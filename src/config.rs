@@ -252,6 +252,11 @@ pub struct General {
     /// Frames per second while the window is in the background (0 = draw nothing until
     /// it is focused again, so a running game gets the whole GPU).
     pub background_fps: f32,
+    /// Potato mode: much faster at the cost of looks everywhere. No background effects (a plain
+    /// colour instead), no bloom, no anti-aliasing, no shadows, no outline, no disc rainbow,
+    /// smaller cover textures and fewer games kept around the selection. The settings it
+    /// overrides keep their own values for when it is turned off again.
+    pub potato: bool,
 }
 
 impl Default for General {
@@ -275,6 +280,7 @@ impl Default for General {
             scan_on_start: true,
             window_radius: 14,
             background_fps: 0.0,
+            potato: false,
         }
     }
 }
@@ -975,6 +981,50 @@ impl Config {
         if let Ok(text) = toml::to_string_pretty(&self.data) {
             let _ = std::fs::write(config_path(), text);
         }
+    }
+
+    // What is actually used for the settings potato mode overrides (see `General::potato`).
+
+    pub fn potato(&self) -> bool {
+        self.data.general.potato
+    }
+
+    pub fn msaa_samples(&self) -> u32 {
+        if self.potato() { 1 } else { self.data.general.msaa }
+    }
+
+    pub fn bloom(&self) -> bool {
+        self.data.general.bloom && !self.potato()
+    }
+
+    pub fn shadows(&self) -> bool {
+        self.data.general.shadows && !self.potato()
+    }
+
+    /// Minimum items kept on each side of the selection (layouts still keep what they show).
+    pub fn window_radius(&self) -> usize {
+        if self.potato() { 0 } else { self.data.general.window_radius }
+    }
+
+    pub fn disc_rainbow(&self) -> f32 {
+        if self.potato() { 0.0 } else { self.data.display.disc_rainbow.max(0.0) }
+    }
+
+    /// The hover highlight: potato mode swaps the outline (an extra see-through shell) for the glow.
+    pub fn highlight(&self) -> &str {
+        match self.data.display.highlight.as_str() {
+            "outline" | "both" if self.potato() => "glow",
+            h => h,
+        }
+    }
+
+    /// Settings for the cover service: potato mode caps textures at 256 px.
+    pub fn cover_settings(&self) -> Covers {
+        let mut c = self.data.covers.clone();
+        if self.potato() {
+            c.max_texture_size = c.max_texture_size.min(256);
+        }
+        c
     }
 
     pub fn layout_params(&self, kind: LayoutKind) -> LayoutParams {

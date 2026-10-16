@@ -42,6 +42,8 @@ enum Effect {
     Rainbow,
     /// Re-filter; scan first if no uninstalled games have been found yet.
     Uninstalled,
+    /// Potato mode: covers at the new texture size, items rebuilt without the costly extras.
+    Potato,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -307,6 +309,7 @@ fn entries() -> Vec<Entry> {
         header!("Screen"),
         toggle!("Fullscreen", general.fullscreen, Effect::Window),
         adv(toggle!("Vsync", general.vsync, Effect::Window)),
+        toggle!("Potato mode (much faster, plainer looks)", general.potato, Effect::Potato),
         num!("Brightness", general.brightness, 0.2, 3.0, 0.05, Effect::None),
         adv(toggle!("Shadows", general.shadows, Effect::None)),
         adv(num!("FPS in background (0 = paused)", general.background_fps, 0.0, 30.0, 1.0, Effect::Window)),
@@ -1427,8 +1430,14 @@ fn apply(ctx: &mut Ctx, effect: Effect) {
             ctx.gfx.rainbow_seed = 0;
             apply(ctx, Effect::Respawn);
         }
+        Effect::Potato => {
+            ctx.svc.set_settings(&ctx.cfg.cover_settings());
+            ctx.view.covers.clear();
+            ctx.view.backs.clear();
+            apply(ctx, Effect::Respawn);
+        }
         Effect::Covers => {
-            ctx.svc.set_settings(&ctx.cfg.covers);
+            ctx.svc.set_settings(&ctx.cfg.cover_settings());
             ctx.svc.missing.clear();
             ctx.view.respawn = true;
         }

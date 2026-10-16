@@ -145,7 +145,7 @@ fn main() {
             many => format!("Removed {} games whose files are no longer there", many.len()),
         });
     }
-    let covers = covers::CoverService::start(cfg.covers.clone());
+    let covers = covers::CoverService::start(cfg.cover_settings());
     let overlay = cfg.general.overlay || args.iter().any(|a| a == "--overlay");
 
     App::new()

@@ -494,26 +494,60 @@ pub struct BgCamera;
 
 /// Halfway overlay can be switched while running: the background camera turns on and the
 /// scene camera stops clearing over it.
-fn overlay_background(
+/// Which passes run, following the settings: the background layer (in the overlay only when
+/// halfway; off in potato mode, where the 3D camera clears to the background's dark colour
+/// instead), HDR with bloom, and MSAA.
+#[allow(clippy::too_many_arguments)]
+fn apply_cameras(
+    mut commands: Commands,
     cfg: Res<Config>,
     overlay: Res<Overlay>,
-    mut bg: Query<&mut Camera, (With<BgCamera>, Without<MainCamera>)>,
-    mut main: Query<&mut Camera, (With<MainCamera>, Without<BgCamera>)>,
+    bg: Res<BgState>,
+    mut msaa: ResMut<Msaa>,
+    mut bg_cam: Query<&mut Camera, (With<BgCamera>, Without<MainCamera>)>,
+    mut main: Query<(Entity, &mut Camera, Has<BloomSettings>), (With<MainCamera>, Without<BgCamera>)>,
 ) {
-    if !overlay.0 || !cfg.is_changed() {
-        return;
-    }
-    let halfway = cfg.background.overlay_halfway;
-    for mut c in &mut bg {
-        if c.is_active != halfway {
-            c.is_active = halfway;
+    let potato = cfg.potato();
+    let bg_on = !potato && (!overlay.0 || cfg.background.overlay_halfway);
+    // Bloom adds light without alpha, which would vanish over the desktop.
+    let hdr = cfg.bloom() && !overlay.0;
+    for mut c in &mut bg_cam {
+        if c.is_active != bg_on {
+            c.is_active = bg_on;
+        }
+        if c.hdr != hdr {
+            c.hdr = hdr;
         }
     }
-    for mut c in &mut main {
-        let want = if halfway { ClearColorConfig::None } else { ClearColorConfig::Custom(Color::NONE) };
-        if !matches!((&c.clear_color, &want), (ClearColorConfig::None, ClearColorConfig::None) | (ClearColorConfig::Custom(_), ClearColorConfig::Custom(_))) {
-            c.clear_color = want;
+    let clear = if bg_on {
+        ClearColorConfig::None
+    } else if overlay.0 {
+        ClearColorConfig::Custom(Color::NONE)
+    } else {
+        let c = bg.current[0];
+        ClearColorConfig::Custom(Color::linear_rgb(c.x, c.y, c.z))
+    };
+    for (e, mut c, bloom) in &mut main {
+        let same = match (&c.clear_color, &clear) {
+            (ClearColorConfig::None, ClearColorConfig::None) => true,
+            (ClearColorConfig::Custom(a), ClearColorConfig::Custom(b)) => a == b,
+            _ => false,
+        };
+        if !same {
+            c.clear_color = clear;
         }
+        if c.hdr != hdr {
+            c.hdr = hdr;
+        }
+        if hdr && !bloom {
+            commands.entity(e).insert(BloomSettings { intensity: 0.10, ..BloomSettings::NATURAL });
+        } else if !hdr && bloom {
+            commands.entity(e).remove::<BloomSettings>();
+        }
+    }
+    let want = msaa_from(cfg.msaa_samples());
+    if *msaa != want {
+        *msaa = want;
     }
 }
 
@@ -546,7 +580,7 @@ impl Plugin for LauncherPlugin {
             .insert_resource(ConfigWatch { mtime: mtime_of(&config_path()), timer: 0.0 })
             .add_systems(Startup, setup)
             .add_systems(Last, save_on_exit)
-            .add_systems(Update, overlay_background)
+            .add_systems(Update, apply_cameras)
             .add_systems(Update, place_window)
             .add_systems(Update, apply_covers.after(apply_spines).before(animate_items))
             .add_systems(Update, crate::egg::egg_input.after(gather_mouse).after(gather_keyboard).after(gather_gamepad).before(handle_actions))
@@ -661,7 +695,7 @@ fn setup(
     }
 
     // Bloom adds light without alpha, which would vanish over the desktop.
-    let hdr = cfg.general.bloom && !overlay;
+    let hdr = cfg.bloom() && !overlay;
     // Background: own camera + layer, rendered first.
     let bg = spawn_background(&mut commands, &mut meshes, &mut bg_mats, &cfg, RenderLayers::layer(1));
     commands.insert_resource(bg);
@@ -724,7 +758,7 @@ fn setup(
     commands.insert_resource(AmbientLight { color: Color::WHITE, brightness: 450.0 });
     commands.spawn((
         DirectionalLightBundle {
-            directional_light: DirectionalLight { illuminance: 6500.0, shadows_enabled: cfg.general.shadows, ..default() },
+            directional_light: DirectionalLight { illuminance: 6500.0, shadows_enabled: cfg.shadows(), ..default() },
             transform: Transform::from_translation(render::KEY_LIGHT_POS).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
@@ -1823,7 +1857,7 @@ fn sync_items(
     if view.view.is_empty() || view.egg {
         return;
     }
-    let r = layouts::window_radius(cfg.display.layout, &view.params, cfg.general.window_radius, view.zoom);
+    let r = layouts::window_radius(cfg.display.layout, &view.params, cfg.window_radius(), view.zoom);
     let n = view.view.len();
     let at = view.anchor();
     // Everything within `r` steps of the selection (or where the wall is panned to), the short
@@ -2147,7 +2181,7 @@ fn update_outlines(
 ) {
     let Some(mat) = gfx.outline.clone() else { return };
     // Recolour when the settings change. With bloom the colour is pushed past white so it glows.
-    let hdr = cfg.general.bloom && !overlay.0;
+    let hdr = cfg.bloom() && !overlay.0;
     let key = format!("{}{hdr}", cfg.display.highlight_color);
     if *applied != key {
         let c = crate::config::parse_hex(&cfg.display.highlight_color);
@@ -2158,7 +2192,7 @@ fn update_outlines(
         }
         *applied = key;
     }
-    let on = matches!(cfg.display.highlight.as_str(), "outline" | "both") && launch.game.is_none();
+    let on = matches!(cfg.highlight(), "outline" | "both") && launch.game.is_none();
     for item in &items {
         let Ok(mut vis) = outlines.get_mut(item.outline) else { continue };
         let want = if on && view.hovered == Some(item.view_index) { Visibility::Inherited } else { Visibility::Hidden };
@@ -2176,7 +2210,7 @@ fn hover_glow(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut lit: Local<Option<usize>>,
 ) {
-    let target = if matches!(cfg.display.highlight.as_str(), "glow" | "both") { view.hovered } else { None };
+    let target = if matches!(cfg.highlight(), "glow" | "both") { view.hovered } else { None };
     if *lit == target {
         return;
     }
@@ -2284,7 +2318,8 @@ fn request_extras(
             });
         }
     }
-    if cfg.background.style == BackgroundStyle::GameArt {
+    // Potato mode draws no background, so the art is not needed.
+    if cfg.background.style == BackgroundStyle::GameArt && !cfg.potato() {
         if let Some(g) = view.current(&lib) {
             if !bg_art.cache.contains_key(&g.id) && !svc.backdrops_pending.contains(&g.id) && !svc.pending.contains(&g.id) {
                 svc.request_backdrop(BackdropRequest {
@@ -2566,7 +2601,7 @@ fn animate_items(
     let dt = time.delta_seconds().min(0.1);
     let t = time.elapsed_seconds();
     let aspect = windows.get_single().map(|w| w.width() / w.height().max(1.0)).unwrap_or(16.0 / 9.0);
-    let r = (layouts::window_radius(cfg.display.layout, &view.params, cfg.general.window_radius, view.zoom) as f32 - 2.0).max(1.0);
+    let r = (layouts::window_radius(cfg.display.layout, &view.params, cfg.window_radius(), view.zoom) as f32 - 2.0).max(1.0);
     // Looping: head for the copy of the selection nearest where the view is now, so going
     // from the last game to the first carries on forwards instead of sweeping back.
     let target = view.focus + view.rel(view.selected);
@@ -3274,7 +3309,7 @@ fn animate_camera(
     ambient.brightness = 450.0 * b;
     if let Ok(mut l) = key.get_single_mut() {
         l.illuminance = 6500.0 * b;
-        l.shadows_enabled = cfg.general.shadows;
+        l.shadows_enabled = cfg.shadows();
     }
     if let Ok(mut l) = rim.get_single_mut() {
         l.illuminance = 2500.0 * b;
@@ -3450,7 +3485,6 @@ fn config_watch(
     mut cfg: ResMut<Config>,
     mut view: ResMut<ViewState>,
     mut gfx: ResMut<Gfx>,
-    mut msaa: ResMut<Msaa>,
     mut winit: ResMut<bevy::winit::WinitSettings>,
     svc: ResMut<CoverService>,
     mut toast: ResMut<Toast>,
@@ -3466,10 +3500,15 @@ fn config_watch(
         return;
     }
     watch.mtime = m;
+    let was_potato = cfg.potato();
     *cfg = Config::load();
-    *msaa = msaa_from(cfg.general.msaa);
+    if cfg.potato() != was_potato {
+        // Load the covers again at the new texture size.
+        view.covers.clear();
+        view.backs.clear();
+    }
     *winit = winit_settings(&cfg, windows.get_single().is_ok_and(|w| w.transparent));
-    svc.set_settings(&cfg.covers);
+    svc.set_settings(&cfg.cover_settings());
     if let Ok(mut w) = windows.get_single_mut() {
         apply_window(&mut w, &cfg);
     }
@@ -3536,6 +3575,6 @@ pub fn winit_settings(cfg: &Config, overlay: bool) -> bevy::winit::WinitSettings
 
 // Re-exported so main.rs does not need to know about internals.
 pub fn initial_msaa(cfg: &Config) -> Msaa {
-    msaa_from(cfg.general.msaa)
+    msaa_from(cfg.msaa_samples())
 }
 

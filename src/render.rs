@@ -1696,9 +1696,9 @@ fn add_media(cx: &mut SpawnCtx, game: &Game, media: Media, ac: [f32; 3], parts: 
             let data_mesh = g.mesh(format!("data2{key}"), m, || ring(r_hub, r, zb, false, r, seg));
             let rim = g.mesh(format!("rim{key}"), m, || tube(r, zb, zt, true, seg));
 
-            let rainbow = cx.cfg.display.disc_rainbow.max(0.0);
+            let rainbow = cx.cfg.disc_rainbow();
             let clear = cx.gfx.clear_plastic(cx.materials, 0.08, 0.05);
-            let sheen = cx.gfx.disc_clear(cx.disc_materials, rainbow.max(0.6));
+            let sheen = cx.gfx.disc_clear(cx.disc_materials, if cx.cfg.potato() { 0.0 } else { rainbow.max(0.6) });
             let mirror = cx.gfx.disc(cx.disc_materials, "mirror", 0.0, 1.0);
             let data = cx.gfx.disc(cx.disc_materials, "data", rainbow, 0.85);
             let label = cover_material(cx.materials, ac);
@@ -1731,7 +1731,7 @@ fn add_media(cx: &mut SpawnCtx, game: &Game, media: Media, ac: [f32; 3], parts: 
             parts.push(Part { mesh: lm, material: Mat::Std(label.clone()), transform: Transform::from_xyz(0.0, h * 0.06, d * 0.5 + EPS), slot });
             slots.push(CoverSlot { mat: label, aspect: lw / lh, kind: ArtKind::Media });
             // The disc shows through the window in the back.
-            let rainbow = cx.cfg.display.disc_rainbow.max(0.0);
+            let rainbow = cx.cfg.disc_rainbow();
             let data = cx.gfx.disc(cx.disc_materials, "data", rainbow, 0.85);
             let window = cx.gfx.mesh("umd_win".into(), cx.meshes, || ring(0.55, 2.85, 0.0, false, 3.0, 96));
             let hubm = cx.gfx.mesh("umd_hub".into(), cx.meshes, || ring(0.0, 0.55, 0.0, false, 3.0, 48));

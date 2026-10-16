@@ -490,6 +490,10 @@ fn update_background(
             m.params = p;
         }
     }
+    // Potato mode draws no background (see `app::apply_cameras`).
+    if cfg.potato() {
+        return;
+    }
     if let Some(m) = mats.get_mut(&bg.handle) {
         m.params.time = time.elapsed_seconds();
         // Seconds of the day (UTC), counting on from start: the PS2 style's orbs follow the clock.

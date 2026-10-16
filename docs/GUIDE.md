@@ -151,6 +151,13 @@ a see-through window, so expect a borderless window with a black background ther
 While the window is in the background (e.g. a game is running) Slipcase draws nothing and uses next to no
 CPU or GPU (`general.background_fps`, 0 by default).
 
+**Potato mode** (Settings > Screen > Potato mode, or `general.potato = true`, off by default): for slow GPUs
+and laptops. It runs much faster but looks plainer: the animated background and game art become a plain colour
+that still follows the cover, and bloom, anti-aliasing, shadows, the hover outline (the glow is used instead)
+and the disc rainbow are all off. Covers load at 256 px at most, and only the games the layout actually shows
+are kept around the selection. It switches on and off without a restart, and your own values for those
+settings come back when it is turned off.
+
 ## Display modes
 
 Layouts (`display.layout`): `cover_flow`, `spiral`, `stacks`, `towers`, `messy_towers`, `carousel`, `stack`, `pile`, `shelf`, `grid`, `table`, `stand_up`, `spines`, `helix`.
