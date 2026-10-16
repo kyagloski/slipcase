@@ -106,7 +106,7 @@ and throw them), and one climbs out of the pile for you.
 ## 🚀 Getting started
 
 ```sh
-git clone https://github.com/<you>/slipcase && cd slipcase
+git clone https://github.com/kyagloski/slipcase && cd slipcase
 ./build.sh                       # Linux   -> dist/slipcase-linux-x86_64
 ./dist/slipcase-linux-x86_64
 ```
