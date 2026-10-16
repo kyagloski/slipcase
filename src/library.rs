@@ -26,7 +26,7 @@ pub struct Game {
     pub title: String,
     pub platform: Platform,
     pub launch: Launch,
-    /// Where this came from: "steam", "epic", "lutris", "heroic", "rom", "exe", "manual".
+    /// Where this came from: "steam", "epic", "gog", "ea", "ubisoft", "lutris", "heroic", "flatpak", "rom", "exe", "manual".
     pub source: String,
     pub steam_appid: Option<u32>,
     /// ROM / executable path, used to derive libretro cover names.

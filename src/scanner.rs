@@ -1,7 +1,8 @@
 //! Finds installed games on Windows and Linux.
 //!
-//! Sources: Steam (all library folders), Epic Games Launcher (Windows), Lutris,
-//! Heroic (Epic via legendary), ROM folders and plain "one folder per game" directories.
+//! Sources: Steam (all library folders), Epic Games Launcher, GOG Galaxy, EA app / Origin and
+//! Ubisoft Connect (Windows), Lutris, Heroic (Epic, GOG, Amazon), Flatpak games (Linux), ROM
+//! folders and plain "one folder per game" directories.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,18 @@ pub fn scan_all(cfg: &Config) -> Vec<Game> {
     }
     if cfg.scan.heroic {
         out.extend(scan_heroic());
+    }
+    if cfg.scan.gog {
+        out.extend(scan_gog());
+    }
+    if cfg.scan.ea {
+        out.extend(scan_ea());
+    }
+    if cfg.scan.ubisoft {
+        out.extend(scan_ubisoft());
+    }
+    if cfg.scan.flatpak {
+        out.extend(scan_flatpak());
     }
     for d in &cfg.scan.rom_dirs {
         out.extend(scan_rom_dir(d, cfg));
@@ -223,26 +236,63 @@ pub fn scan_epic() -> Vec<Game> {
     out
 }
 
+/// Heroic's config folders (native and Flatpak installs).
+fn heroic_bases() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    if let Some(c) = dirs::config_dir() {
+        bases.push(c.join("heroic"));
+    }
+    if let Some(h) = dirs::home_dir() {
+        bases.push(h.join(".var/app/com.heroicgameslauncher.hgl/config/heroic"));
+    }
+    bases
+}
+
+fn read_json(p: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+}
+
+/// app_name -> title from one of Heroic's store caches.
+fn heroic_titles(base: &Path, file: &str) -> std::collections::HashMap<String, String> {
+    let v = read_json(&base.join("store_cache").join(file)).unwrap_or_default();
+    let list = v.get("library").or_else(|| v.get("games")).and_then(|l| l.as_array()).cloned().unwrap_or_default();
+    list.iter()
+        .filter_map(|g| Some((g.get("app_name")?.as_str()?.to_string(), g.get("title")?.as_str()?.to_string())))
+        .collect()
+}
+
+/// Installed games from Heroic's Epic (legendary), GOG and Amazon (nile) libraries.
 pub fn scan_heroic() -> Vec<Game> {
     let mut out = Vec::new();
-    let Some(cfg_dir) = dirs::config_dir() else { return out };
-    let candidates = [
-        cfg_dir.join("heroic/legendaryConfig/legendary/installed.json"),
-        dirs::home_dir().unwrap_or_default().join(".var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary/installed.json"),
-    ];
-    for p in candidates {
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        let Some(map) = v.as_object() else { continue };
-        for (app, info) in map {
-            let title = info.get("title").and_then(|t| t.as_str()).unwrap_or(app).to_string();
-            out.push(Game::new(
-                format!("heroic:{app}"),
-                title,
-                Platform::Pc,
-                Launch::Uri { uri: format!("heroic://launch/legendary/{app}") },
-                "heroic",
-            ));
+    let heroic = |app: &str, title: String, runner: &str| {
+        Game::new(format!("heroic:{app}"), title, Platform::Pc, Launch::Uri { uri: format!("heroic://launch/{runner}/{app}") }, "heroic")
+    };
+    for base in heroic_bases() {
+        if let Some(map) = read_json(&base.join("legendaryConfig/legendary/installed.json")).as_ref().and_then(|v| v.as_object()) {
+            for (app, info) in map {
+                let title = info.get("title").and_then(|t| t.as_str()).unwrap_or(app).to_string();
+                out.push(heroic(app, title, "legendary"));
+            }
+        }
+        // GOG and Amazon keep only ids and paths; titles come from the store cache, else the folder name.
+        let folder_title = |p: Option<&str>| p.and_then(|p| Path::new(p).file_name()).map(|n| clean_title(&n.to_string_lossy()));
+        let gog = read_json(&base.join("gog_store/installed.json"));
+        if let Some(list) = gog.as_ref().and_then(|v| v.get("installed")).and_then(|l| l.as_array()) {
+            let titles = heroic_titles(&base, "gog_library.json");
+            for g in list {
+                let Some(app) = g.get("appName").and_then(|x| x.as_str()) else { continue };
+                let Some(title) = titles.get(app).cloned().or_else(|| folder_title(g.get("install_path").and_then(|x| x.as_str()))) else { continue };
+                out.push(heroic(app, title, "gog"));
+            }
+        }
+        let nile = read_json(&base.join("nile_config/nile/installed.json"));
+        if let Some(list) = nile.as_ref().and_then(|v| v.as_array()) {
+            let titles = heroic_titles(&base, "nile_library.json");
+            for g in list {
+                let Some(app) = g.get("id").and_then(|x| x.as_str()) else { continue };
+                let Some(title) = titles.get(app).cloned().or_else(|| folder_title(g.get("path").and_then(|x| x.as_str()))) else { continue };
+                out.push(heroic(app, title, "nile"));
+            }
         }
     }
     out
@@ -282,6 +332,273 @@ pub fn scan_lutris() -> Vec<Game> {
         ));
     }
     out
+}
+
+// ------------------------------------------------------------------------------------------------
+// Flatpak (Linux)
+// ------------------------------------------------------------------------------------------------
+
+/// Flatpak apps in the Game category that are themselves launchers or tools, not games.
+const FLATPAK_NOT_GAMES: &[&str] = &[
+    "com.valvesoftware.Steam",
+    "com.heroicgameslauncher.hgl",
+    "net.lutris.Lutris",
+    "com.usebottles.bottles",
+    "io.itch.itch",
+    "com.github.Matoking.protontricks",
+    "net.davidotek.pupgui2",
+    "io.github.slipcase",
+];
+/// Categories that mark a Game-tagged app as a tool (emulators, Proton managers, ...).
+const FLATPAK_TOOL_CATEGORIES: &[&str] = &["Emulator", "Utility", "PackageManager", "Settings", "System", "Development"];
+
+/// Splits a desktop-entry `Exec=` line into arguments, dropping `%U`-style field codes and
+/// Flatpak's `@@`/`@@u` file-forwarding markers.
+fn desktop_exec_args(exec: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let (mut inq, mut esc, mut started) = (false, false, false);
+    for c in exec.chars() {
+        if esc {
+            cur.push(c);
+            esc = false;
+        } else if c == '\\' && inq {
+            esc = true;
+        } else if c == '"' {
+            inq = !inq;
+            started = true;
+        } else if c.is_whitespace() && !inq {
+            if started {
+                args.push(std::mem::take(&mut cur));
+                started = false;
+            }
+        } else {
+            cur.push(c);
+            started = true;
+        }
+    }
+    if started {
+        args.push(cur);
+    }
+    args.retain(|a| !(a.len() == 2 && a.starts_with('%')) && a != "@@" && a != "@@u");
+    args
+}
+
+/// Games installed as Flatpaks (system and user installs), e.g. the Hytale launcher.
+pub fn scan_flatpak() -> Vec<Game> {
+    let mut out = Vec::new();
+    let mut dirs_ = vec![PathBuf::from("/var/lib/flatpak/exports/share/applications")];
+    if let Some(d) = dirs::data_dir() {
+        dirs_.push(d.join("flatpak/exports/share/applications"));
+    }
+    for dir in dirs_ {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.extension().map(|x| x != "desktop").unwrap_or(true) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            // Only the main [Desktop Entry] group; actions follow in their own groups.
+            let mut in_entry = false;
+            let mut kv = std::collections::HashMap::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_entry = line == "[Desktop Entry]";
+                } else if let Some((k, v)) = line.split_once('=').filter(|_| in_entry) {
+                    kv.entry(k.trim().to_string()).or_insert_with(|| v.trim().to_string());
+                }
+            }
+            let get = |k: &str| kv.get(k).map(String::as_str).unwrap_or("");
+            let cats: Vec<&str> = get("Categories").split(';').filter(|c| !c.is_empty()).collect();
+            let app_id = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let flatpak_id = if get("X-Flatpak").is_empty() { app_id.clone() } else { get("X-Flatpak").to_string() };
+            if !cats.contains(&"Game")
+                || cats.iter().any(|c| FLATPAK_TOOL_CATEGORIES.contains(c))
+                || FLATPAK_NOT_GAMES.contains(&flatpak_id.as_str())
+                || get("NoDisplay") == "true"
+                || get("Hidden") == "true"
+                || get("Type") != "Application"
+            {
+                continue;
+            }
+            let name = get("Name");
+            if name.is_empty() {
+                continue;
+            }
+            // "Hytale Launcher" -> "Hytale", so covers and metadata match the game.
+            let title = name.strip_suffix(" Launcher").unwrap_or(name).to_string();
+            let mut args = desktop_exec_args(get("Exec"));
+            if args.is_empty() {
+                args = vec!["flatpak".into(), "run".into(), flatpak_id.clone()];
+            }
+            let program = args.remove(0);
+            out.push(Game::new(format!("flatpak:{app_id}"), title, Platform::Pc, Launch::Command { program, args, cwd: None }, "flatpak"));
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------------------------------------
+// GOG Galaxy / EA app (Origin) / Ubisoft Connect (Windows)
+// ------------------------------------------------------------------------------------------------
+
+/// GOG Galaxy (and standalone GOG installers), from the registry entries they write.
+pub fn scan_gog() -> Vec<Game> {
+    #[allow(unused_mut)]
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        for sub in [r"SOFTWARE\WOW6432Node\GOG.com\Games", r"SOFTWARE\GOG.com\Games"] {
+            let Ok(games) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(sub) else { continue };
+            for id in games.enum_keys().flatten() {
+                let Ok(k) = games.open_subkey(&id) else { continue };
+                let get = |n: &str| k.get_value::<String, _>(n).unwrap_or_default();
+                let (name, exe) = (get("gameName"), get("exe"));
+                // DLC entries point at their parent game.
+                if name.is_empty() || exe.is_empty() || !Path::new(&exe).is_file() || (!get("dependsOn").is_empty() && get("dependsOn") != id) {
+                    continue;
+                }
+                let args: Vec<String> = get("launchParam").split_whitespace().map(String::from).collect();
+                let cwd = Some(get("workingDir")).filter(|s| !s.is_empty()).or_else(|| Some(get("path")));
+                let mut g = Game::new(format!("gog:{id}"), name, Platform::Pc, Launch::Command { program: exe.clone(), args, cwd }, "gog");
+                g.path = Some(exe);
+                out.push(g);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(any(windows, test))]
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// EA app / Origin: Origin's LocalContent manifests, plus the EA app's registry entries
+/// (whose game folders hold the content id in `__Installer\installerdata.xml`).
+pub fn scan_ea() -> Vec<Game> {
+    #[allow(unused_mut)]
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        let launch = |ids: &str| Launch::Uri { uri: format!("origin2://game/launch?offerIds={ids}&autoDownload=1") };
+        let pd = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+        if let Ok(rd) = std::fs::read_dir(PathBuf::from(&pd).join(r"Origin\LocalContent")) {
+            for dir in rd.flatten() {
+                let title = dir.file_name().to_string_lossy().to_string();
+                let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+                for f in files.flatten() {
+                    if f.path().extension().map(|x| x != "mfst").unwrap_or(true) {
+                        continue;
+                    }
+                    let Ok(text) = std::fs::read_to_string(f.path()) else { continue };
+                    let q: std::collections::HashMap<String, String> = text
+                        .trim_start_matches('?')
+                        .split('&')
+                        .filter_map(|kv| kv.split_once('='))
+                        .map(|(k, v)| (k.to_ascii_lowercase(), percent_decode(v)))
+                        .collect();
+                    let Some(id) = q.get("id").filter(|i| !i.is_empty() && !i.contains('@')) else { continue };
+                    if !q.get("dipinstallpath").map(|p| Path::new(p).is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    out.push(Game::new(format!("ea:{id}"), clean_title(&title), Platform::Pc, launch(id), "ea"));
+                    break;
+                }
+            }
+        }
+        use winreg::enums::*;
+        use winreg::RegKey;
+        if let Ok(games) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(r"SOFTWARE\WOW6432Node\EA Games") {
+            for name in games.enum_keys().flatten() {
+                let Ok(k) = games.open_subkey(&name) else { continue };
+                let Ok(dir) = k.get_value::<String, _>("Install Dir") else { continue };
+                let Ok(xml) = std::fs::read_to_string(Path::new(&dir).join(r"__Installer\installerdata.xml")) else { continue };
+                let ids: Vec<&str> = xml
+                    .split("<contentID>")
+                    .skip(1)
+                    .filter_map(|s| s.split("</contentID>").next())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if ids.is_empty() || out.iter().any(|g: &Game| ids.iter().any(|i| g.id == format!("ea:{i}"))) {
+                    continue;
+                }
+                let title = k.get_value::<String, _>("DisplayName").unwrap_or(name);
+                out.push(Game::new(format!("ea:{}", ids[0]), title, Platform::Pc, launch(&ids.join(",")), "ea"));
+            }
+        }
+    }
+    out
+}
+
+/// Ubisoft Connect, from the launcher's install registry.
+pub fn scan_ubisoft() -> Vec<Game> {
+    #[allow(unused_mut)]
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let Ok(installs) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs") else { return out };
+        for id in installs.enum_keys().flatten() {
+            let Ok(k) = installs.open_subkey(&id) else { continue };
+            let Ok(dir) = k.get_value::<String, _>("InstallDir") else { continue };
+            let dir = PathBuf::from(dir.trim_end_matches(['/', '\\']));
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(folder) = dir.file_name() else { continue };
+            let title = clean_title(&folder.to_string_lossy());
+            out.push(Game::new(format!("ubisoft:{id}"), title, Platform::Pc, Launch::Uri { uri: format!("uplay://launch/{id}/0") }, "ubisoft"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    #[test]
+    fn exec_args() {
+        let a = desktop_exec_args("/usr/bin/flatpak run --branch=stable --command=entrypoint --file-forwarding com.x.Y @@u %U @@");
+        assert_eq!(a, ["/usr/bin/flatpak", "run", "--branch=stable", "--command=entrypoint", "--file-forwarding", "com.x.Y"]);
+        assert_eq!(desktop_exec_args(r#""/opt/My Game/run" -x"#), ["/opt/My Game/run", "-x"]);
+    }
+
+    #[test]
+    fn percent() {
+        assert_eq!(percent_decode("C%3a%5cProgram%20Files%5cGame"), r"C:\Program Files\Game");
+        assert_eq!(percent_decode("100%"), "100%");
+    }
+
+    /// Lists this computer's Flatpak games; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn local_flatpak() {
+        for g in scan_flatpak() {
+            println!("{} {:?}", g.title, g.launch);
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -625,14 +942,7 @@ fn kv_walk(b: &[u8], strings: &[String], indexed: bool, path: &mut Vec<String>, 
 /// Games in Heroic's Epic / GOG / Amazon libraries that are not installed.
 pub fn scan_heroic_owned(installed: &HashSet<String>) -> Vec<Game> {
     let mut out = Vec::new();
-    let mut bases = Vec::new();
-    if let Some(c) = dirs::config_dir() {
-        bases.push(c.join("heroic"));
-    }
-    if let Some(h) = dirs::home_dir() {
-        bases.push(h.join(".var/app/com.heroicgameslauncher.hgl/config/heroic"));
-    }
-    for base in bases {
+    for base in heroic_bases() {
         for (file, runner) in [("store_cache/legendary_library.json", "legendary"), ("store_cache/gog_library.json", "gog"), ("store_cache/nile_library.json", "nile")] {
             let Ok(text) = std::fs::read_to_string(base.join(file)) else { continue };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };

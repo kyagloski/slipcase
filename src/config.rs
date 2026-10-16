@@ -705,6 +705,12 @@ pub struct Scan {
     pub epic: bool,
     pub lutris: bool,
     pub heroic: bool,
+    /// GOG Galaxy, EA app / Origin, Ubisoft Connect (Windows).
+    pub gog: bool,
+    pub ea: bool,
+    pub ubisoft: bool,
+    /// Flatpak apps in the Game category (Linux), e.g. the Hytale launcher.
+    pub flatpak: bool,
     /// Additional Steam library roots (folders containing `steamapps`).
     pub steam_libraries: Vec<String>,
     pub rom_dirs: Vec<RomDir>,
@@ -731,6 +737,10 @@ impl Default for Scan {
             epic: true,
             lutris: true,
             heroic: true,
+            gog: true,
+            ea: true,
+            ubisoft: true,
+            flatpak: true,
             steam_libraries: vec![],
             rom_dirs: vec![],
             game_dirs: vec![],
