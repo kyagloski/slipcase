@@ -1,6 +1,8 @@
 <div align="center">
 
-# 💿 Slipcase
+<img src="icon.png" width="140" alt="Slipcase icon">
+
+# Slipcase
 
 **Your game library, back on the shelf.**
 
