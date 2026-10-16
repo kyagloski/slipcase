@@ -5,7 +5,7 @@
 # Slipcase
 
 **Your game library, back on the shelf.**
-**WARNING: VIBE CODED (i just think its cool dont judge me)**
+<br/>**WARNING: VIBE CODED (i just think its cool dont judge me)**
 
 A native 3D game launcher that shows every game you own as a real case, disc or cartridge,<br>
 like the old console dashboards. Pull one off the pile, open it up, read the manual, play.
