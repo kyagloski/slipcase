@@ -13,7 +13,7 @@ like the old console dashboards. Pull one off the pile, open it up, read the man
 ![Bevy](https://img.shields.io/badge/Bevy_0.14-232326?style=for-the-badge&logo=bevy&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-1a1a1a?style=for-the-badge&logo=linux&logoColor=yellow)
 ![Windows](https://img.shields.io/badge/Windows-1a1a1a?style=for-the-badge&logo=windows&logoColor=00a4ef)
-
+M / ⚙️ 	settings
 <img src="docs/media/hero.gif" width="820" alt="Slipcase browsing a Steam library as two towers of game cases">
 
 </div>
@@ -120,10 +120,10 @@ straight to where you left off.
 |---|---|
 | **← →** | browse |
 | **Enter** | play |
-| **Space** / tap **Shift** | open the case |
+| **Space** / **Shift** | open the case |
 | **Tab** | next layout |
 | **B** | next background |
-| **M** / ⚙️ | settings |
+| **M** / **F1** | settings |
 
 Everything is rebindable, and every setting has a menu entry. For the full list of options, layouts,
 keys and config values, see **[the guide](docs/GUIDE.md)**.
