@@ -4,6 +4,7 @@
 #   ./build.sh                 optimised build for this machine  -> dist/slipcase-linux-x86_64
 #   ./build.sh linux-portable  build inside Docker on an old glibc so it runs on most distros
 #   ./build.sh windows         cross-build a static .exe (needs `cargo install cargo-xwin`, or mingw-w64)
+#   ./build.sh appimage        native build packed as dist/Slipcase-<arch>.AppImage (downloads appimagetool)
 #   ./build.sh all             native + windows
 #   NO_GAMEPAD=1 ./build.sh    build without controller support (drops the libudev dependency)
 #
@@ -59,10 +60,47 @@ windows() {
     echo "-> dist/$NAME-windows-x86_64.exe"
 }
 
+# Packs the native build into an AppImage: one file that runs on most distros with a double click.
+appimage() {
+    native
+    local arch; arch=$(uname -m)
+    local dir=target/AppDir
+    rm -rf "$dir"
+    mkdir -p "$dir/usr/bin"
+    cp "dist/$NAME-linux-$arch" "$dir/usr/bin/$NAME"
+    cp icon.png "$dir/$NAME.png"
+    ln -sf "$NAME.png" "$dir/.DirIcon"
+    cat > "$dir/$NAME.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Slipcase
+Comment=Your game library as real cases, discs and cartridges
+Exec=$NAME
+Icon=$NAME
+Categories=Game;
+Terminal=false
+DESKTOP
+    cat > "$dir/AppRun" <<'APPRUN'
+#!/bin/sh
+here="$(dirname "$(readlink -f "$0")")"
+exec "$here/usr/bin/slipcase" "$@"
+APPRUN
+    chmod +x "$dir/AppRun"
+    local tool="target/appimagetool-$arch.AppImage"
+    if [[ ! -x $tool ]]; then
+        curl -fL -o "$tool" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$arch.AppImage"
+        chmod +x "$tool"
+    fi
+    # Extract-and-run: works without FUSE (CI runners, containers).
+    APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$arch "$tool" --no-appstream "$dir" "dist/Slipcase-$arch.AppImage"
+    echo "-> dist/Slipcase-$arch.AppImage"
+}
+
 case "${1:-native}" in
     native|linux) native ;;
     linux-portable) portable ;;
     windows) windows ;;
+    appimage) appimage ;;
     all) native; windows ;;
     *) sed -n '2,14p' "$0"; exit 1 ;;
 esac

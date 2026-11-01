@@ -850,7 +850,10 @@ fn restart_app(ctx: &mut Ctx) {
     ctx.cfg.save();
     ctx.lib.save();
     let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--overlay").collect();
-    match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).spawn()) {
+    // From an AppImage, start the AppImage again: the folder this binary runs from goes away
+    // when this copy quits.
+    let exe = std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).map(Ok).unwrap_or_else(std::env::current_exe);
+    match exe.and_then(|exe| std::process::Command::new(exe).args(&args).spawn()) {
         Ok(_) => {}
         Err(e) => eprintln!("[slipcase] could not restart: {e}"),
     }

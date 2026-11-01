@@ -1,6 +1,6 @@
 [package]
 name = "slipcase"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A fast, native 3D game launcher: cases, discs and shelves, in the spirit of the Aurora dashboard."
 license = "MIT"

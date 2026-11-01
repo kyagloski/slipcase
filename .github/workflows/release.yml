@@ -22,12 +22,13 @@ jobs:
       matrix:
         include:
           # Older Ubuntu, so the Linux binaries run on older glibc versions too.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, file: slipcase-linux-x86_64 }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, file: slipcase-linux-arm64 }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, file: Slipcase-x86_64.AppImage }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, file: Slipcase-aarch64.AppImage }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, file: slipcase-windows-x86_64.exe }
           - { os: windows-latest, target: aarch64-pc-windows-msvc, file: slipcase-windows-arm64.exe }
-          - { os: macos-14, target: aarch64-apple-darwin, file: slipcase-macos-arm64 }
-          - { os: macos-13, target: x86_64-apple-darwin, file: slipcase-macos-x86_64 }
+          # Apple Silicon runner; the Intel build is cross-compiled there (Xcode has both).
+          - { os: macos-15, target: aarch64-apple-darwin, file: slipcase-macos-arm64 }
+          - { os: macos-15, target: x86_64-apple-darwin, file: slipcase-macos-x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +44,14 @@ jobs:
       - name: Test
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test --release
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: AppImage
+        if: runner.os == 'Linux'
+        run: ./build.sh appimage
+      - name: Build
+        if: runner.os != 'Linux'
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Collect
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           mkdir -p dist
@@ -54,6 +61,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.file }}
+          if-no-files-found: error
           path: dist/${{ matrix.file }}
 
   release:
@@ -65,7 +73,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: chmod +x dist/slipcase-linux-* dist/slipcase-macos-* 2>/dev/null || true
+      - run: chmod +x dist/*.AppImage dist/slipcase-macos-* 2>/dev/null || true
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
