@@ -1,5 +1,5 @@
-# Builds Slipcase for Linux and Windows and publishes a GitHub release when a version tag
-# (v0.1.0, v0.2.0, ...) is pushed. Run it by hand from the Actions tab to just build.
+# Builds Slipcase for Linux, Windows and macOS and publishes a GitHub release when a version
+# tag (v0.1.0, v0.2.0, ...) is pushed. Run it by hand from the Actions tab to just build.
 name: release
 
 on:
@@ -15,53 +15,57 @@ env:
   CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
 
 jobs:
-  linux:
-    # An older Ubuntu, so the binary runs on older glibc versions too.
-    runs-on: ubuntu-22.04
+  build:
+    strategy:
+      # One platform failing still lets the others finish and be released.
+      fail-fast: false
+      matrix:
+        include:
+          # Older Ubuntu, so the Linux binaries run on older glibc versions too.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, file: slipcase-linux-x86_64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, file: slipcase-linux-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, file: slipcase-windows-x86_64.exe }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, file: slipcase-windows-arm64.exe }
+          - { os: macos-14, target: aarch64-apple-darwin, file: slipcase-macos-arm64 }
+          - { os: macos-13, target: x86_64-apple-darwin, file: slipcase-macos-x86_64 }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Build dependencies
+        with:
+          key: ${{ matrix.target }}
+      - name: Build dependencies (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libwayland-dev libxkbcommon-dev
-      - run: cargo test --release
-      - run: cargo build --release
-      - run: |
-          mkdir -p dist
-          cp target/release/slipcase dist/slipcase-linux-x86_64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: dist/slipcase-linux-x86_64
-
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target x86_64-pc-windows-msvc
-      - shell: bash
+      - name: Test
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --release
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Collect
+        shell: bash
         run: |
           mkdir -p dist
-          cp target/x86_64-pc-windows-msvc/release/slipcase.exe dist/slipcase-windows-x86_64.exe
+          bin=target/${{ matrix.target }}/release/slipcase
+          [[ -f $bin.exe ]] && bin=$bin.exe
+          cp "$bin" "dist/${{ matrix.file }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
-          path: dist/slipcase-windows-x86_64.exe
+          name: ${{ matrix.file }}
+          path: dist/${{ matrix.file }}
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - run: chmod +x dist/slipcase-linux-x86_64
+      - run: chmod +x dist/slipcase-linux-* dist/slipcase-macos-* 2>/dev/null || true
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
