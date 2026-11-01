@@ -58,6 +58,7 @@ enum Act {
     BackgroundImage,
     BrowseLocation,
     HideGame,
+    RemoveGame,
 }
 
 enum Kind {
@@ -78,6 +79,12 @@ enum Kind {
     GameLocation,
     /// Extra launch arguments.
     GameArgs,
+    /// Proton build for a Windows program on Linux.
+    GameProton,
+    /// Environment variables passed to Proton.
+    GameProtonOptions,
+    /// Default Proton build (Launching).
+    ProtonDefault,
     /// A hidden game in the library (by id); activating it unhides it.
     HiddenGame(String),
     /// A hidden title no scan has found yet; activating it removes it from the list.
@@ -206,10 +213,13 @@ fn entries() -> Vec<Entry> {
         Entry { label: "Location (Enter to type, empty = detected)", kind: Kind::GameLocation, effect: Effect::None, advanced: true },
         Entry { label: "Browse for location...", kind: Kind::Act(Act::BrowseLocation), effect: Effect::None, advanced: true },
         Entry { label: "Launch arguments", kind: Kind::GameArgs, effect: Effect::None, advanced: true },
+        Entry { label: "Proton version", kind: Kind::GameProton, effect: Effect::None, advanced: false },
+        Entry { label: "Proton options (e.g. PROTON_ENABLE_NVAPI=1)", kind: Kind::GameProtonOptions, effect: Effect::None, advanced: true },
         Entry { label: "Choose art (cover, disc, insert)...", kind: Kind::Act(Act::ChooseArt), effect: Effect::None, advanced: false },
         Entry { label: "Choose cover image...", kind: Kind::Act(Act::SetCover), effect: Effect::None, advanced: true },
         Entry { label: "Download cover again", kind: Kind::Act(Act::RefetchCover), effect: Effect::None, advanced: true },
         Entry { label: "Hide this game", kind: Kind::Act(Act::HideGame), effect: Effect::None, advanced: false },
+        Entry { label: "Remove from library (added by hand)", kind: Kind::Act(Act::RemoveGame), effect: Effect::None, advanced: false },
         // Filled in from the library, see `hidden_entries`.
         header!(HIDDEN_HEADER),
         header!("Layout"),
@@ -293,6 +303,7 @@ fn entries() -> Vec<Entry> {
         toggle!("Open the case and take the game out", launch.open_case, Effect::None),
         adv(num!("Open-case length (s)", launch.open_duration, 1.0, 6.0, 0.1, Effect::None)),
         adv(toggle!("Minimize after launching", general.minimize_on_launch, Effect::None)),
+        Entry { label: "Proton for Windows programs", kind: Kind::ProtonDefault, effect: Effect::None, advanced: true },
         toggle!("Close after launching", general.close_on_launch, Effect::None),
         header!("Motion"),
         num!("Speed", animation.speed, 0.2, 4.0, 0.1, Effect::None),
@@ -367,6 +378,12 @@ pub struct Menu {
     color: Option<ColorPick>,
     /// The art chooser, while it is open.
     art: Option<ArtPick>,
+    /// The Proton rows are listed: the selected game is a Windows program on Linux.
+    proton_rows: bool,
+    /// The remove row is listed: the selected game was added by hand.
+    remove_row: bool,
+    /// Remove was pressed once for this game: a second press before the time removes it.
+    remove_armed: Option<(String, std::time::Instant)>,
 }
 
 impl Menu {
@@ -414,6 +431,9 @@ impl Default for Menu {
             restart_prompt: false,
             color: None,
             art: None,
+            proton_rows: false,
+            remove_row: false,
+            remove_armed: None,
             expanded: Vec::new(),
             // Every category starts folded.
             collapsed: category_headers(),
@@ -1170,6 +1190,22 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
             })
             .unwrap_or_default(),
         Kind::GameArgs => game.map(|g| if g.launch_args.is_empty() { "(none)".to_string() } else { crate::render::truncate(&g.launch_args, 26) }).unwrap_or_default(),
+        Kind::GameProton => game
+            .map(|g| match g.proton.as_str() {
+                "" => format!("Default ({})", crate::proton::resolve("", &cfg.launch.proton).map_or("none found".into(), |t| t.name)),
+                crate::proton::OFF => "Off (run directly)".into(),
+                name => name.to_string(),
+            })
+            .map(|s| crate::render::truncate(&s, 30))
+            .unwrap_or_default(),
+        Kind::GameProtonOptions => game.map(|g| if g.proton_options.is_empty() { "(none)".to_string() } else { crate::render::truncate(&g.proton_options, 26) }).unwrap_or_default(),
+        Kind::ProtonDefault => crate::render::truncate(
+            &match crate::proton::tools().into_iter().find(|t| t.name == cfg.launch.proton) {
+                Some(t) => t.name,
+                None => format!("Auto ({})", crate::proton::resolve("", "").map_or("none found".into(), |t| t.name)),
+            },
+            30,
+        ),
         Kind::HiddenGame(_) => "Unhide".into(),
         Kind::HiddenTitle(_) => "Unhide (not found yet)".into(),
         Kind::Note(_) => String::new(),
@@ -1179,7 +1215,7 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
 
 /// Entries changed with < and >.
 fn has_arrows(e: &Entry) -> bool {
-    matches!(e.kind, Kind::Num { .. } | Kind::Choice { .. } | Kind::RomPlatform | Kind::GamePlatform)
+    matches!(e.kind, Kind::Num { .. } | Kind::Choice { .. } | Kind::RomPlatform | Kind::GamePlatform | Kind::GameProton | Kind::ProtonDefault)
 }
 
 /// Text in the label column: hidden games show their title.
@@ -1536,6 +1572,29 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 menu.editing = ctx.view.selected_game(&ctx.lib).map(|g| crate::textedit::TextEdit::new("Launch arguments", &g.launch_args));
             }
         }
+        Kind::GameProtonOptions => {
+            if d == 0 {
+                menu.editing = ctx.view.selected_game(&ctx.lib).map(|g| crate::textedit::TextEdit::new("Proton options (KEY=value ...)", &g.proton_options));
+            }
+        }
+        Kind::GameProton => {
+            // Default, each installed build, then Off.
+            let mut opts: Vec<String> = vec![String::new()];
+            opts.extend(crate::proton::tools().into_iter().map(|t| t.name));
+            opts.push(crate::proton::OFF.into());
+            if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
+                let i = opts.iter().position(|o| *o == g.proton).unwrap_or(0) as i32;
+                g.proton = opts[(i + dir).rem_euclid(opts.len() as i32) as usize].clone();
+                ctx.persist.mark_lib();
+            }
+        }
+        Kind::ProtonDefault => {
+            let mut opts: Vec<String> = vec![String::new()];
+            opts.extend(crate::proton::tools().into_iter().map(|t| t.name));
+            let i = opts.iter().position(|o| *o == ctx.cfg.launch.proton).unwrap_or(0) as i32;
+            ctx.cfg.launch.proton = opts[(i + dir).rem_euclid(opts.len() as i32) as usize].clone();
+            apply(ctx, effect);
+        }
         Kind::GameFavorite => {
             if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
                 g.favorite = !g.favorite;
@@ -1549,6 +1608,11 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 g.replatformed = true;
                 ctx.lib.revision += 1;
                 ctx.persist.mark_lib();
+                // Another console has another case shape and banner: redo the cover, spine,
+                // back and the rest for it.
+                if let Some(id) = &game_id {
+                    forget_game_art(ctx, id);
+                }
                 apply(ctx, effect);
             }
         }
@@ -1645,6 +1709,19 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                     ctx.toast.show("Downloading the cover again...");
                 }
             }
+            Act::RemoveGame => {
+                let Some(id) = game_id else { return };
+                let armed = menu.remove_armed.take().is_some_and(|(a, at)| a == id && at.elapsed().as_secs_f32() < RESET_CONFIRM_SECS);
+                let title = ctx.lib.find(&id).map(|g| g.title.clone()).unwrap_or_default();
+                if !armed {
+                    menu.remove_armed = Some((id, std::time::Instant::now()));
+                    ctx.toast.show(format!("Press again to remove {title} from the library"));
+                } else if ctx.lib.remove(&id).is_some() {
+                    ctx.persist.mark_lib();
+                    ctx.view.dirty = true;
+                    ctx.toast.show(format!("Removed {title}"));
+                }
+            }
             Act::HideGame => {
                 if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
                     g.hidden = true;
@@ -1656,6 +1733,23 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
             }
         },
     }
+}
+
+/// Drops everything shown or cached for a game's art so it is fetched and made again.
+fn forget_game_art(ctx: &mut Ctx, id: &str) {
+    crate::covers::forget_all_art(id);
+    let svc: &mut CoverService = &mut ctx.svc;
+    for set in [&mut svc.missing, &mut svc.pending, &mut svc.backs_pending, &mut svc.spines_pending, &mut svc.backdrops_pending, &mut svc.carts_asked, &mut svc.pages_asked] {
+        set.remove(id);
+    }
+    svc.arts_asked.retain(|(g, _)| g != id);
+    let view: &mut ViewState = &mut ctx.view;
+    view.covers.remove(id);
+    view.backs.remove(id);
+    view.spines.remove(id);
+    view.pages.remove(id);
+    view.arts.retain(|(g, _), _| g != id);
+    view.respawn = true;
 }
 
 fn commit_edit(menu: &mut Menu, ctx: &mut Ctx) {
@@ -1678,6 +1772,14 @@ fn commit_edit(menu: &mut Menu, ctx: &mut Ctx) {
             ctx.persist.mark_lib();
             ctx.view.respawn = true;
             apply(ctx, effect);
+        }
+        Kind::GameProtonOptions => {
+            let id = ctx.view.selected_game(&ctx.lib).map(|g| g.id.clone());
+            if let Some(g) = id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
+                g.proton_options = text.trim().to_string();
+                ctx.persist.mark_lib();
+                ctx.toast.show("Proton options saved");
+            }
         }
         Kind::GameLocation | Kind::GameArgs => {
             let is_loc = matches!(menu.entries[menu.index].kind, Kind::GameLocation);
@@ -1760,8 +1862,13 @@ fn menu_input(
             keep_visible(&mut menu);
         }
     }
-    // Rebuild the hidden games section when the library changes.
-    if menu.built != Some(ctx.lib.revision) {
+    // Rebuild the hidden games section when the library changes, and the Proton rows when
+    // the selected game starts or stops being a Windows program.
+    let proton_rows = ctx.view.selected_game(&ctx.lib).is_some_and(|g| g.uses_proton());
+    let remove_row = ctx.view.selected_game(&ctx.lib).is_some_and(|g| g.manual);
+    if menu.built != Some(ctx.lib.revision) || menu.proton_rows != proton_rows || menu.remove_row != remove_row {
+        menu.proton_rows = proton_rows;
+        menu.remove_row = remove_row;
         rebuild_entries(&mut menu, &ctx.lib, &ctx.cfg);
     }
 
@@ -1978,6 +2085,12 @@ fn reset_settings(ctx: &mut Ctx) {
 /// Static entries plus one row per hidden game after the "Hidden games" header.
 fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
     let mut all = entries();
+    all.retain(|e| match e.kind {
+        Kind::GameProton | Kind::GameProtonOptions => menu.proton_rows,
+        Kind::ProtonDefault => cfg!(target_os = "linux"),
+        Kind::Act(Act::RemoveGame) => menu.remove_row,
+        _ => true,
+    });
     if let Some(h) = all.iter().position(|e| matches!(e.kind, Kind::Header) && e.label == HIDDEN_HEADER) {
         let tail = all.split_off(h + 1);
         all.extend(hidden_entries(lib, cfg));
@@ -3017,6 +3130,3 @@ fn draw_art_picker(
         };
     }
 }
-
-
-

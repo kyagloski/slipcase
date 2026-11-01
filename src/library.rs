@@ -61,6 +61,12 @@ pub struct Game {
     /// Set by the user: extra arguments added to the launch command.
     #[serde(default)]
     pub launch_args: String,
+    /// Windows programs on Linux: Proton build to run with ("" = the default, "off" = run directly).
+    #[serde(default)]
+    pub proton: String,
+    /// Environment variables for Proton, e.g. `PROTON_ENABLE_NVAPI=1 DXVK_HUD=fps`.
+    #[serde(default)]
+    pub proton_options: String,
     /// Hidden from the launcher (listed under Settings > Hidden games).
     #[serde(default)]
     pub hidden: bool,
@@ -109,6 +115,8 @@ impl Game {
             replatformed: false,
             custom_location: None,
             launch_args: String::new(),
+            proton: String::new(),
+            proton_options: String::new(),
             hidden: false,
             cart_color: None,
             media_art: None,
@@ -129,6 +137,19 @@ impl Game {
             Launch::Command { program, .. } => program.clone(),
             Launch::Rom { path } => path.clone(),
         }
+    }
+
+    /// What launching does, with the user's location applied.
+    fn effective_launch(&self) -> Launch {
+        match &self.custom_location {
+            Some(loc) => location_launch(self, loc),
+            None => self.launch.clone(),
+        }
+    }
+
+    /// A Windows program on Linux, which needs Proton to run.
+    pub fn uses_proton(&self) -> bool {
+        cfg!(target_os = "linux") && matches!(self.effective_launch(), Launch::Command { program, .. } if crate::proton::is_windows_program(&program))
     }
 }
 
@@ -163,6 +184,13 @@ impl Library {
 
     pub fn find_mut(&mut self, id: &str) -> Option<&mut Game> {
         self.games.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Takes a game out of the library; returns it if it was there.
+    pub fn remove(&mut self, id: &str) -> Option<Game> {
+        let i = self.games.iter().position(|g| g.id == id)?;
+        self.revision += 1;
+        Some(self.games.remove(i))
     }
 
     pub fn find(&self, id: &str) -> Option<&Game> {
@@ -395,10 +423,15 @@ pub fn expand_command(template: &str, rom: &str) -> Vec<String> {
 
 pub fn launch_game(game: &Game, cfg: &Config) -> Result<(), String> {
     let extra = expand_command(&game.launch_args, "");
-    let launch = match &game.custom_location {
-        Some(loc) => location_launch(game, loc),
-        None => game.launch.clone(),
-    };
+    let launch = game.effective_launch();
+    if game.uses_proton() && game.proton != crate::proton::OFF {
+        if let Launch::Command { program, args, .. } = &launch {
+            let tool = crate::proton::resolve(&game.proton, &cfg.launch.proton).ok_or("No Proton found: install one in Steam (or GE-Proton), or set Proton to Off")?;
+            let all: Vec<String> = args.iter().chain(&extra).cloned().collect();
+            let mut c = crate::proton::command(&tool, &game.id, program, &all, &game.proton_options)?;
+            return c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("{}: {e}", tool.name));
+        }
+    }
     match &launch {
         // Steam takes extra arguments through its run URI.
         Launch::Uri { uri } if !extra.is_empty() => {

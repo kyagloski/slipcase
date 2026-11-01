@@ -880,6 +880,24 @@ pub fn case_border(kind: CaseKind) -> f32 {
     }
 }
 
+/// Margin round the printed art on a case with corner radius `rc`: a sleeve is a plain
+/// rectangle under the plastic, so it sits in far enough for its corners to clear the rounded
+/// ones instead of being cut off by them. Cardboard boxes are printed to the edge.
+fn print_border(kind: CaseKind, rc: f32) -> f32 {
+    match kind {
+        CaseKind::Box => case_border(kind),
+        _ => case_border(kind).max(rc * (1.0 - std::f32::consts::FRAC_1_SQRT_2) + 0.03),
+    }
+}
+
+/// Corner radius of the printed art on the opening side (square except on cardboard boxes).
+fn print_corner(kind: CaseKind, rc: f32, border: f32) -> f32 {
+    match kind {
+        CaseKind::Box => (rc - border).max(0.0),
+        _ => 0.0,
+    }
+}
+
 fn case_wall(kind: CaseKind) -> f32 {
     match kind {
         CaseKind::Box => 0.06,
@@ -898,7 +916,9 @@ struct CaseDims {
     wall: f32,
     /// Corner radius of the two corners on the opening edge.
     rc: f32,
+    /// Margin round the printed art, and the radius of the art's corners on the opening side.
     border: f32,
+    print_r: f32,
     groove: Option<Groove>,
 }
 
@@ -906,6 +926,8 @@ impl CaseDims {
     fn new(case: (f32, f32, f32), kind: CaseKind, rc: f32, notch: bool) -> Self {
         let (cw, ch, cd) = case;
         let br = case_bevel(kind, cd);
+        let rc = rc.clamp(0.0, cw.min(ch) * 0.3);
+        let border = print_border(kind, rc);
         let groove = (notch && kind == CaseKind::Keep)
             .then(|| Groove { len: (ch * 0.3).clamp(2.0, 6.0).min(ch - 0.6), depth: (cd * 0.18).clamp(0.08, 0.24) });
         Self {
@@ -915,8 +937,9 @@ impl CaseDims {
             br,
             xs: -cw * 0.5 + br,
             wall: case_wall(kind),
-            rc: rc.clamp(0.0, cw.min(ch) * 0.3),
-            border: case_border(kind),
+            rc,
+            border,
+            print_r: print_corner(kind, rc, border),
             groove,
         }
     }
@@ -1160,12 +1183,28 @@ fn banner_image(b: &crate::platform::Banner, font: Option<&fontdue::Font>, w: u3
 
 /// Cover art outline (centred on its own middle): square on the spine side, following the
 /// case's corner radius on the opening side. Returns (outline, width, height, centre x).
-fn cover_outline(c: &CaseDims) -> (Vec<Vec2>, f32, f32, f32) {
+/// `top_cut` leaves that much room at the top (for the console banner), with a square corner.
+fn cover_outline(c: &CaseDims, top_cut: f32) -> (Vec<Vec2>, f32, f32, f32) {
     let (x0, x1) = (c.xs, c.hw - c.border);
-    let (w, h) = (x1 - x0, (c.hh - c.border) * 2.0);
-    let r = (c.rc - c.border).max(0.0);
-    let pts = rounded_poly(&[(-w * 0.5, -h * 0.5, 0.0), (w * 0.5, -h * 0.5, r), (w * 0.5, h * 0.5, r), (-w * 0.5, h * 0.5, 0.0)]);
+    let (w, h) = (x1 - x0, (c.hh - c.border) * 2.0 - top_cut);
+    let r = c.print_r;
+    let rt = if top_cut > 0.0 { 0.0 } else { r };
+    let pts = rounded_poly(&[(-w * 0.5, -h * 0.5, 0.0), (w * 0.5, -h * 0.5, r), (w * 0.5, h * 0.5, rt), (-w * 0.5, h * 0.5, 0.0)]);
     (pts, w, h, (x0 + x1) * 0.5)
+}
+
+/// Height of the console banner as a share of the printed cover's height.
+fn banner_frac(kind: CaseKind) -> f32 {
+    match kind {
+        CaseKind::Keep => 0.1,
+        CaseKind::Jewel => 0.09,
+        CaseKind::Box => 0.08,
+    }
+}
+
+/// Height of the banner across a platform's cover (0 when it has none or banners are off).
+fn banner_height(cfg: &Config, p: Platform, kind: CaseKind, cover_h: f32) -> f32 {
+    if cfg.display.platform_banners && p.banner().is_some() { cover_h * banner_frac(kind) } else { 0.0 }
 }
 
 /// Rosette hub a disc clips onto, standing on the floor of the case (z = 0 at the floor).
@@ -1548,12 +1587,26 @@ pub fn case_look(cfg: &Config, p: Platform) -> CaseLook {
     l
 }
 
-/// width / height of the printed front cover of a platform's case.
-pub fn front_aspect(cfg: &Config, p: Platform) -> f32 {
+/// Margin round the printed art on a platform's case (as `CaseDims` works it out).
+fn print_border_of(cfg: &Config, p: Platform) -> f32 {
+    let (cw, ch, _) = geometry(cfg, p).case;
+    print_border(case_look(cfg, p).kind, corner_radius(cfg, p).clamp(0.0, cw.min(ch) * 0.3))
+}
+
+/// width / height of the whole printed panel of a platform's case (back cover, manual).
+pub fn panel_aspect(cfg: &Config, p: Platform) -> f32 {
     let (cw, ch, cd) = geometry(cfg, p).case;
     let kind = case_look(cfg, p).kind;
-    let b = case_border(kind);
+    let b = print_border_of(cfg, p);
     (cw - case_bevel(kind, cd) - b) / (ch - b * 2.0)
+}
+
+/// width / height of the front cover art: the panel below the console banner.
+pub fn front_aspect(cfg: &Config, p: Platform) -> f32 {
+    let (_, ch, _) = geometry(cfg, p).case;
+    let kind = case_look(cfg, p).kind;
+    let h = ch - print_border_of(cfg, p) * 2.0;
+    panel_aspect(cfg, p) * h / (h - banner_height(cfg, p, kind, h))
 }
 
 /// Unlit, back faces only (see the outline shell in `spawn_item`).
@@ -1847,8 +1900,11 @@ fn add_case(
     parts.push(Part { mesh: spine, material: Mat::Std(shell.clone()), transform: Transform::IDENTITY, slot: Slot::Spine });
 
     // Printed covers: front on the lid, back on the tray, the spine wrapped round its bevels.
-    let (art, fw, fh, acx) = cover_outline(c);
-    let front_mesh = cx.gfx.mesh(format!("front{key}"), cx.meshes, || flat_poly(&art, 0.0, true, fw, fh));
+    let (art, fw, fh, acx) = cover_outline(c, 0.0);
+    // The front art stops under the console banner instead of going behind it.
+    let bh = banner_height(cx.cfg, game.platform, look.kind, fh);
+    let (front_art, _, front_h, _) = cover_outline(c, bh);
+    let front_mesh = cx.gfx.mesh(format!("front{key}/{bh:.3}"), cx.meshes, || flat_poly(&front_art, 0.0, true, fw, front_h));
     let back_mesh = cx.gfx.mesh(format!("back{key}"), cx.meshes, || flat_poly(&art, 0.0, false, fw, fh));
     let front = cover_material(cx.materials, ac);
     let back = cx.materials.add(StandardMaterial {
@@ -1858,7 +1914,7 @@ fn add_case(
         depth_bias: PRINT_BIAS,
         ..default()
     });
-    parts.push(Part { mesh: front_mesh, material: Mat::Std(front.clone()), transform: Transform::from_xyz(acx, 0.0, c.hd + EPS), slot: Slot::Lid });
+    parts.push(Part { mesh: front_mesh, material: Mat::Std(front.clone()), transform: Transform::from_xyz(acx, -bh * 0.5, c.hd + EPS), slot: Slot::Lid });
     parts.push(Part { mesh: back_mesh, material: Mat::Std(back.clone()), transform: Transform::from_xyz(acx, 0.0, -c.hd - EPS), slot: Slot::Root });
     let (sw, sh) = {
         let prof = spine_profile(c, EPS);
@@ -1880,14 +1936,9 @@ fn add_case(
     // later on the manual: material and height).
     let mut manual_banner: Option<(Handle<StandardMaterial>, f32)> = None;
     if let Some(banner) = cx.cfg.display.platform_banners.then(|| game.platform.banner()).flatten() {
-        let bh = fh * match look.kind {
-            CaseKind::Keep => 0.1,
-            CaseKind::Jewel => 0.09,
-            CaseKind::Box => 0.08,
-        };
         let top = c.hh - c.border;
         // Front: follows the art's rounded top corner on the opening side.
-        let r = (c.rc - c.border).max(0.0);
+        let r = c.print_r;
         let poly = rounded_poly(&[(-fw * 0.5, -bh * 0.5, 0.0), (fw * 0.5, -bh * 0.5, 0.0), (fw * 0.5, bh * 0.5, r), (-fw * 0.5, bh * 0.5, 0.0)]);
         let front_band = cx.gfx.mesh(format!("band_f{key}/{bh:.3}"), cx.meshes, || flat_poly(&poly, 0.0, true, fw, bh));
         let spine_band_mesh = cx.gfx.mesh(format!("band_s{key}/{bh:.3}"), cx.meshes, || spine_band(c, top, bh));
@@ -1924,7 +1975,7 @@ fn add_case(
         parts.push(Part { mesh: spine_band_mesh, material: Mat::Std(spine_band_mat), transform: Transform::IDENTITY, slot: Slot::Spine });
         manual_banner = Some((front_mat.clone(), bh));
     }
-    slots.push(CoverSlot { mat: front, aspect: fw / fh, kind: ArtKind::Cover });
+    slots.push(CoverSlot { mat: front, aspect: fw / front_h, kind: ArtKind::Cover });
     *back_slot = Some(CoverSlot { mat: back, aspect: fw / fh, kind: ArtKind::Back });
     *spine_slot = Some(CoverSlot { mat: spine_mat, aspect: sw / sh, kind: ArtKind::Spine });
 

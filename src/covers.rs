@@ -28,7 +28,7 @@ use crate::library::Game;
 use crate::platform::Platform;
 use crate::render::{draw_text, fit_text, wrap_text, ArtKind};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CoverRequest {
     pub id: String,
     pub title: String,
@@ -41,6 +41,9 @@ pub struct CoverRequest {
     /// width / height of the printed cover the image will be shown on.
     pub aspect: f32,
     pub want_metadata: bool,
+    /// Colour of the console banner drawn over the cover; a band of it printed across the
+    /// top of a box scan is cut off so the two do not stack.
+    pub banner_bg: Option<[u8; 3]>,
 }
 
 impl CoverRequest {
@@ -55,6 +58,7 @@ impl CoverRequest {
             is_pc: matches!(g.platform, Platform::Pc | Platform::Other),
             aspect: crate::render::front_aspect(cfg, g.platform),
             want_metadata: cfg.covers.fetch_metadata && g.description.is_empty(),
+            banner_bg: cfg.display.platform_banners.then(|| g.platform.banner()).flatten().map(|b| [(b.bg >> 16) as u8, (b.bg >> 8) as u8, b.bg as u8]),
         }
     }
 }
@@ -66,7 +70,7 @@ fn libretro_system(g: &Game, cfg: &crate::config::Config) -> Option<String> {
 }
 
 /// Everything needed to print the back of a game case.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BackRequest {
     pub id: String,
     pub title: String,
@@ -144,7 +148,7 @@ pub enum CoverMsg {
 }
 
 /// Art for the disc / cartridge label or the insert, so they need not repeat the cover.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ArtRequest {
     /// The game (ids, Steam app, screenshots lookups).
     pub game: BackRequest,
@@ -160,7 +164,7 @@ pub struct ArtRequest {
 impl ArtRequest {
     pub fn from_game(g: &Game, cfg: &crate::config::Config, kind: ArtKind) -> Self {
         let disc = matches!(crate::render::geometry(cfg, g.platform).media, crate::platform::Media::Disc { .. });
-        let aspect = if kind == ArtKind::Media && disc { 1.0 } else { crate::render::front_aspect(cfg, g.platform) };
+        let aspect = if kind == ArtKind::Media && disc { 1.0 } else { crate::render::panel_aspect(cfg, g.platform) };
         let chosen = match kind {
             ArtKind::Media => g.media_art.clone(),
             ArtKind::Insert => g.insert_art.clone(),
@@ -171,7 +175,7 @@ impl ArtRequest {
 }
 
 /// A spine label for a case.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SpineRequest {
     pub id: String,
     pub title: String,
@@ -188,7 +192,7 @@ pub struct SpineRequest {
 }
 
 /// A blurred full-screen backdrop for the selected game.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BackdropRequest {
     pub id: String,
     /// Blur radius multiplier (1 = default).
@@ -233,6 +237,8 @@ struct Worker {
     settings: Covers,
     font: Arc<Option<fontdue::Font>>,
     steam_caches: Vec<PathBuf>,
+    /// Files read for the texture being made (see `ready`).
+    deps: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl CoverService {
@@ -261,6 +267,7 @@ impl CoverService {
                 settings: settings.clone(),
                 font: font.clone(),
                 steam_caches: steam_caches.clone(),
+                deps: Default::default(),
             };
             let (job_rx, res_tx) = (job_rx.clone(), res_tx.clone());
             std::thread::spawn(move || {
@@ -270,8 +277,8 @@ impl CoverService {
                     }
                     match job {
                         Job::Cover(req) => {
-                            let msg = match w.load_cover(&req) {
-                                Some(c) => CoverMsg::Cover(c),
+                            let msg = match w.ready(&req.id, "cover", &req, || w.load_cover(&req)) {
+                                Some((c, _)) => CoverMsg::Cover(c),
                                 None => CoverMsg::Missing(req.id.clone()),
                             };
                             let _ = res_tx.send(msg);
@@ -282,17 +289,23 @@ impl CoverService {
                             }
                         }
                         Job::Back(req) => {
-                            let b = w.make_back(&req);
-                            keep_made(&b, ArtKind::Back);
-                            let _ = res_tx.send(CoverMsg::Back(b));
+                            if let Some((b, fresh)) = w.ready(&req.id, "back", &req, || Some(w.make_back(&req))) {
+                                if fresh || !made_file(&b.id, ArtKind::Back).is_file() {
+                                    keep_made(&b, ArtKind::Back);
+                                }
+                                let _ = res_tx.send(CoverMsg::Back(b));
+                            }
                         }
                         Job::Spine(req) => {
-                            let s = w.make_spine(&req);
-                            keep_made(&s, ArtKind::Spine);
-                            let _ = res_tx.send(CoverMsg::Spine(s));
+                            if let Some((s, fresh)) = w.ready(&req.id, "spine", &req, || Some(w.make_spine(&req))) {
+                                if fresh || !made_file(&s.id, ArtKind::Spine).is_file() {
+                                    keep_made(&s, ArtKind::Spine);
+                                }
+                                let _ = res_tx.send(CoverMsg::Spine(s));
+                            }
                         }
                         Job::Backdrop(req) => {
-                            if let Some(b) = w.make_backdrop(&req) {
+                            if let Some((b, _)) = w.ready(&req.id, "backdrop", &req, || w.make_backdrop(&req)) {
                                 let _ = res_tx.send(CoverMsg::Backdrop(b));
                             }
                         }
@@ -304,8 +317,11 @@ impl CoverService {
                             let _ = res_tx.send(CoverMsg::Pages(w.make_pages(&req)));
                         }
                         Job::Art(req) => {
-                            if let Some(a) = w.make_art(&req) {
-                                keep_made(&a, req.kind);
+                            let what = format!("{:?}", req.kind).to_lowercase();
+                            if let Some((a, fresh)) = w.ready(&req.game.id, &what, &req, || w.make_art(&req)) {
+                                if fresh || !made_file(&a.id, req.kind).is_file() {
+                                    keep_made(&a, req.kind);
+                                }
                                 let _ = res_tx.send(CoverMsg::Art(req.kind, a));
                             }
                         }
@@ -404,6 +420,28 @@ pub fn forget_cover(id: &str) {
     let _ = std::fs::remove_file(cache_dir().join("spines").join(format!("{}.img", safe_name(id))));
 }
 
+/// Deletes every downloaded and generated image of a game (cover, spine, back, disc, logo,
+/// fanart, screenshots, made art) and its LaunchBox match, so all of it is redone, e.g. for
+/// the case of a different console. Art the user picked is kept.
+pub fn forget_all_art(id: &str) {
+    forget_cover(id);
+    crate::launchbox::forget(id);
+    let safe = safe_name(id);
+    let lower = safe.to_lowercase();
+    for kind in ["backs", "discs", "fanart", "heroes", "logos", "pageshots", "snaps", "spines", "made", "ready"] {
+        let Ok(rd) = std::fs::read_dir(cache_dir().join(kind)) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            // "<id>.img", or "<id>_<n>.img" / "<id>_<kind>.png" (made art is lower case).
+            let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+            let rest = stem.strip_prefix(&safe).or_else(|| stem.strip_prefix(&lower));
+            if rest.is_some_and(|r| r.is_empty() || (r.starts_with('_') && !r[1..].contains('_') && !r[1..].is_empty())) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 fn age(p: &Path) -> Option<Duration> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok())
 }
@@ -420,23 +458,31 @@ enum Candidate {
 }
 
 impl Worker {
+    fn finish_cover(&self, req: &CoverRequest, img: DynamicImage) -> CoverReady {
+        let img = match req.banner_bg {
+            Some(bg) => strip_banner(img, bg),
+            None => img,
+        };
+        finish(&req.id, img, req.aspect, self.settings.max_texture_size)
+    }
+
     fn load_cover(&self, req: &CoverRequest) -> Option<CoverReady> {
         let s = &self.settings;
         // 1. user supplied image
         if let Some(p) = &req.cover_path {
-            if let Some(img) = std::fs::read(p).ok().and_then(|b| image::load_from_memory(&b).ok()) {
-                return Some(finish(&req.id, img, req.aspect, s.max_texture_size));
+            if let Some(img) = self.read_file(Path::new(p)).and_then(|b| image::load_from_memory(&b).ok()) {
+                return Some(self.finish_cover(req, img));
             }
         }
         // 2. disk cache
         let file = cache_file(&self.cache, &req.id);
-        let cached = std::fs::read(&file).ok().and_then(|b| image::load_from_memory(&b).ok());
+        let cached = self.read_file(&file).and_then(|b| image::load_from_memory(&b).ok());
         if cached.is_none() {
             let _ = std::fs::remove_file(&file);
         }
         if let Some(img) = &cached {
             if fits(img, req.aspect) || !s.enabled {
-                return Some(finish(&req.id, img.clone(), req.aspect, s.max_texture_size));
+                return Some(self.finish_cover(req, img.clone()));
             }
         }
         if !s.enabled {
@@ -445,7 +491,7 @@ impl Worker {
         // A cached cover with the wrong shape: look for a better one at most once a week.
         let marker = file.with_extension("checked");
         if cached.is_some() && age(&marker).is_some_and(|a| a < Duration::from_secs(7 * 86400)) {
-            return cached.map(|img| finish(&req.id, img, req.aspect, s.max_texture_size));
+            return cached.map(|img| self.finish_cover(req, img));
         }
 
         // 3. sources, in the configured order
@@ -464,7 +510,7 @@ impl Worker {
                 if fits(&img, req.aspect) {
                     let _ = std::fs::write(&file, &bytes);
                     let _ = std::fs::remove_file(&marker);
-                    return Some(finish(&req.id, img, req.aspect, s.max_texture_size));
+                    return Some(self.finish_cover(req, img));
                 }
                 if fallback.is_none() {
                     fallback = Some((bytes, img));
@@ -473,11 +519,11 @@ impl Worker {
         }
         let _ = std::fs::write(&marker, b"");
         if let Some(img) = cached {
-            return Some(finish(&req.id, img, req.aspect, s.max_texture_size));
+            return Some(self.finish_cover(req, img));
         }
         let (bytes, img) = fallback?;
         let _ = std::fs::write(&file, &bytes);
-        Some(finish(&req.id, img, req.aspect, s.max_texture_size))
+        Some(self.finish_cover(req, img))
     }
 
     fn candidates(&self, source: &str, req: &CoverRequest) -> Vec<Candidate> {
@@ -549,13 +595,7 @@ impl Worker {
             return None;
         }
         let page = wikipedia_lookup(&self.agent, &req.title)?;
-        let v: serde_json::Value = self
-            .agent
-            .get(&format!("https://en.wikipedia.org/api/rest_v1/page/summary/{}", url_escape(&page.title.replace(' ', "_"))))
-            .call()
-            .ok()?
-            .into_json()
-            .ok()?;
+        let v = http_json(&self.agent, &format!("https://en.wikipedia.org/api/rest_v1/page/summary/{}", url_escape(&page.title.replace(' ', "_"))), &[], API_TTL)?;
         let description = v.get("extract").and_then(|s| s.as_str()).unwrap_or("").to_string();
         let short = v.get("description").and_then(|s| s.as_str()).unwrap_or("");
         let year = short.split_whitespace().find(|w| w.len() == 4 && w.chars().all(|c| c.is_ascii_digit())).unwrap_or("").to_string();
@@ -572,7 +612,7 @@ impl Worker {
         let mut out = Vec::new();
         for n in 0..2 {
             let f = dir.join(format!("{}_{n}.img", safe_name(&req.id)));
-            if let Some(img) = std::fs::read(&f).ok().and_then(|b| image::load_from_memory(&b).ok()) {
+            if let Some(img) = self.read_file(&f).and_then(|b| image::load_from_memory(&b).ok()) {
                 out.push(img.to_rgba8());
             }
         }
@@ -585,13 +625,7 @@ impl Worker {
         }
         if !urls.is_empty() {
         } else if let Some(app) = req.steam_appid {
-            if let Some(v) = self
-                .agent
-                .get(&format!("https://store.steampowered.com/api/appdetails?appids={app}&filters=screenshots"))
-                .call()
-                .ok()
-                .and_then(|r| r.into_json::<serde_json::Value>().ok())
-            {
+            if let Some(v) = http_json(&self.agent, &format!("https://store.steampowered.com/api/appdetails?appids={app}&filters=screenshots"), &[], API_TTL) {
                 if let Some(a) = v.pointer(&format!("/{app}/data/screenshots")).and_then(|a| a.as_array()) {
                     urls.extend(a.iter().take(2).filter_map(|s| s.get("path_thumbnail").and_then(|u| u.as_str()).map(str::to_owned)));
                 }
@@ -607,6 +641,7 @@ impl Worker {
                 is_pc: false,
                 aspect: 1.0,
                 want_metadata: false,
+                banner_bg: None,
             };
             for kind in ["Named_Snaps", "Named_Titles"] {
                 urls.extend(libretro_urls(&self.agent, &self.cache, &cr, kind).into_iter().take(1));
@@ -636,14 +671,17 @@ impl Worker {
         let dir = cache_dir().join(kind);
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join(format!("{}.img", safe_name(id)));
-        if let Some(img) = std::fs::read(&f).ok().and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = self.read_file(&f).and_then(|b| image::load_from_memory(&b).ok()) {
             return Some(img);
         }
         if !self.settings.enabled {
             return None;
         }
         let bytes = http_bytes(&self.agent, url, 16 * 1024 * 1024)?;
-        let img = image::load_from_memory(&bytes).ok()?;
+        let Ok(img) = image::load_from_memory(&bytes) else {
+            mark_miss(url);
+            return None;
+        };
         let _ = std::fs::write(&f, &bytes);
         Some(img)
     }
@@ -651,8 +689,8 @@ impl Worker {
     fn cover_image(&self, id: &str, cover_path: &Option<String>) -> Option<RgbaImage> {
         cover_path
             .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-            .or_else(|| std::fs::read(cache_file(&self.cache, id)).ok())
+            .and_then(|p| self.read_file(Path::new(p)))
+            .or_else(|| self.read_file(&cache_file(&self.cache, id)))
             .and_then(|b| image::load_from_memory(&b).ok())
             .map(|i| i.to_rgba8())
     }
@@ -665,7 +703,7 @@ impl Worker {
             files.sort();
             for f in files {
                 if f.file_name().is_some_and(|n| n.to_string_lossy().starts_with(prefix)) {
-                    if let Some(img) = std::fs::read(&f).ok().and_then(|b| image::load_from_memory(&b).ok()) {
+                    if let Some(img) = self.read_file(&f).and_then(|b| image::load_from_memory(&b).ok()) {
                         return Some(img);
                     }
                 }
@@ -695,7 +733,7 @@ impl Worker {
             CoverReady { id: req.id.clone(), width: w, height: h, rgba: img.into_raw(), dominant: [0.0; 3] }
         };
         // 0. The user's pick (stood upright if it lies down).
-        if let Some(img) = req.chosen.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = req.chosen.as_ref().and_then(|p| self.read_file(Path::new(p))).and_then(|b| image::load_from_memory(&b).ok()) {
             let mut img = img.to_rgba8();
             if img.width() > img.height() {
                 img = imageops::rotate90(&img);
@@ -766,7 +804,7 @@ impl Worker {
 
     fn make_back(&self, req: &BackRequest) -> CoverReady {
         // The user's pick first.
-        if let Some(img) = req.chosen.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = req.chosen.as_ref().and_then(|p| self.read_file(Path::new(p))).and_then(|b| image::load_from_memory(&b).ok()) {
             let fitted = fit_to_aspect(&img.to_rgba8(), req.aspect, self.settings.max_texture_size);
             let (w, h) = fitted.dimensions();
             return CoverReady { id: req.id.clone(), width: w, height: h, rgba: fitted.into_raw(), dominant: [0.0; 3] };
@@ -823,7 +861,7 @@ impl Worker {
             CoverReady { id: id.clone(), width: w, height: h, rgba: img.into_raw(), dominant: [0.0; 3] }
         };
         if let Some(p) = &req.chosen {
-            let img = std::fs::read(p).ok().and_then(|b| image::load_from_memory(&b).ok())?.to_rgba8();
+            let img = self.read_file(Path::new(p)).and_then(|b| image::load_from_memory(&b).ok())?.to_rgba8();
             return Some(done(cover_fill(&img, (max as f32 * req.aspect.min(1.0)) as u32, (max as f32 / req.aspect.max(1.0)) as u32)));
         }
         match req.kind {
@@ -984,14 +1022,195 @@ pub fn shell_color(img: &RgbaImage) -> Option<[f32; 4]> {
     Some([median(0), median(1), median(2), 1.0])
 }
 
+// ------------------------------------------------------------------------------------------------
+// Download cache
+// ------------------------------------------------------------------------------------------------
+
+/// An address that had nothing (404, or not an image) is not asked again for this long.
+const MISS_TTL: Duration = Duration::from_secs(7 * 86400);
+/// API answers (searches, store entries, asset lists) are reused for this long; an older copy
+/// is still used when the API cannot be reached.
+const API_TTL: Duration = Duration::from_secs(14 * 86400);
+
+thread_local! {
+    /// Set when a download failed for a reason that may pass (offline, timeout, rate limit,
+    /// server error), so what was made without it is not kept.
+    static NET_TROUBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// FNV-1a: a hash that stays the same across builds, for file names in the cache.
+fn stable_hash(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+fn miss_file(url: &str) -> PathBuf {
+    cache_dir().join("http").join("miss").join(format!("{:016x}", stable_hash(url)))
+}
+
+fn missed(url: &str) -> bool {
+    age(&miss_file(url)).is_some_and(|a| a < MISS_TTL)
+}
+
+fn mark_miss(url: &str) {
+    let f = miss_file(url);
+    let _ = std::fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
+    let _ = std::fs::write(f, url);
+}
+
+/// GET, unless the address had nothing a short while ago. "Not found" is remembered; network
+/// trouble, rate limits and key errors are not.
+fn http_get(agent: &ureq::Agent, url: &str, headers: &[(&str, &str)]) -> Option<ureq::Response> {
+    if missed(url) {
+        return None;
+    }
+    let mut r = agent.get(url);
+    for (k, v) in headers {
+        r = r.set(k, v);
+    }
+    match r.call() {
+        Ok(resp) => Some(resp),
+        Err(ureq::Error::Status(404 | 410, _)) => {
+            mark_miss(url);
+            None
+        }
+        Err(e) => {
+            if !matches!(e, ureq::Error::Status(400..=403, _)) {
+                NET_TROUBLE.with(|t| t.set(true));
+            }
+            None
+        }
+    }
+}
+
 fn http_bytes(agent: &ureq::Agent, url: &str, limit: u64) -> Option<Vec<u8>> {
-    let resp = agent.get(url).call().ok()?;
+    let resp = http_get(agent, url, &[])?;
     let mut buf = Vec::new();
-    resp.into_reader().take(limit).read_to_end(&mut buf).ok()?;
+    if resp.into_reader().take(limit).read_to_end(&mut buf).is_err() {
+        NET_TROUBLE.with(|t| t.set(true));
+        return None;
+    }
     if buf.len() < 512 {
+        mark_miss(url);
         None
     } else {
         Some(buf)
+    }
+}
+
+/// An API's JSON answer, kept on disk for `ttl` so the same question is not asked every start.
+fn http_json(agent: &ureq::Agent, url: &str, headers: &[(&str, &str)], ttl: Duration) -> Option<serde_json::Value> {
+    let f = cache_dir().join("http").join("api").join(format!("{:016x}.json", stable_hash(url)));
+    let stored = || std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    if age(&f).is_some_and(|a| a < ttl) {
+        if let Some(v) = stored() {
+            return Some(v);
+        }
+    }
+    match http_get(agent, url, headers).and_then(|r| r.into_json::<serde_json::Value>().ok()) {
+        Some(v) => {
+            let _ = std::fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
+            let _ = std::fs::write(&f, serde_json::to_vec(&v).unwrap_or_default());
+            Some(v)
+        }
+        None => stored(),
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Finished textures
+// ------------------------------------------------------------------------------------------------
+
+/// A finished texture is made again at least this often (a better cover may have turned up).
+const READY_TTL: Duration = Duration::from_secs(7 * 86400);
+
+/// What a finished texture was made from: the request, the build that made it, and each file
+/// it read with its time stamp (None: the file was not there).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadyMeta {
+    sig: u64,
+    deps: Vec<(PathBuf, Option<u64>)>,
+    dominant: [f32; 3],
+    png: bool,
+}
+
+fn stamp(p: &Path) -> Option<u64> {
+    let t = std::fs::metadata(p).and_then(|m| m.modified()).ok()?;
+    Some(t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos() as u64)
+}
+
+/// Changes with every build, so art made by older drawing code is made again.
+fn build_stamp() -> u64 {
+    static S: OnceLock<u64> = OnceLock::new();
+    *S.get_or_init(|| std::env::current_exe().ok().and_then(|e| Some(stamp(&e)? ^ std::fs::metadata(&e).ok()?.len())).unwrap_or(0))
+}
+
+fn ready_base(id: &str, what: &str) -> PathBuf {
+    cache_dir().join("ready").join(format!("{}_{what}", safe_name(id)))
+}
+
+fn load_ready(id: &str, what: &str, sig: u64) -> Option<CoverReady> {
+    let base = ready_base(id, what);
+    let json = base.with_extension("json");
+    if age(&json).is_none_or(|a| a > READY_TTL) {
+        return None;
+    }
+    let meta: ReadyMeta = serde_json::from_slice(&std::fs::read(&json).ok()?).ok()?;
+    if meta.sig != sig || meta.deps.iter().any(|(p, s)| stamp(p) != *s) {
+        return None;
+    }
+    let img = image::load_from_memory(&std::fs::read(base.with_extension(if meta.png { "png" } else { "jpg" })).ok()?).ok()?.to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(CoverReady { id: id.to_string(), width, height, rgba: img.into_raw(), dominant: meta.dominant })
+}
+
+/// Opaque art as a high quality JPEG (small, quick to decode), art with see-through parts as PNG.
+fn save_ready(what: &str, sig: u64, deps: Vec<(PathBuf, Option<u64>)>, c: &CoverReady) {
+    use image::ImageEncoder;
+    let base = ready_base(&c.id, what);
+    let _ = std::fs::create_dir_all(base.parent().unwrap_or(Path::new(".")));
+    let png = c.rgba.chunks_exact(4).any(|p| p[3] != 255);
+    let mut buf = Vec::new();
+    let ok = if png {
+        image::codecs::png::PngEncoder::new_with_quality(&mut buf, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Sub)
+            .write_image(&c.rgba, c.width, c.height, image::ExtendedColorType::Rgba8)
+            .is_ok()
+    } else {
+        let rgb: Vec<u8> = c.rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 94).write_image(&rgb, c.width, c.height, image::ExtendedColorType::Rgb8).is_ok()
+    };
+    if !ok || std::fs::write(base.with_extension(if png { "png" } else { "jpg" }), &buf).is_err() {
+        return;
+    }
+    let meta = ReadyMeta { sig, deps, dominant: c.dominant, png };
+    let _ = std::fs::write(base.with_extension("json"), serde_json::to_vec(&meta).unwrap_or_default());
+}
+
+impl Worker {
+    /// Reads a source file and remembers it as something the texture being made depends on.
+    fn read_file(&self, p: &Path) -> Option<Vec<u8>> {
+        self.deps.borrow_mut().push(p.to_path_buf());
+        std::fs::read(p).ok()
+    }
+
+    /// The finished texture `what` for a game: from the disk when nothing it was made from has
+    /// changed, else made by `make` and stored. The flag is true when it was just made.
+    fn ready(&self, id: &str, what: &str, req: &dyn std::fmt::Debug, make: impl FnOnce() -> Option<CoverReady>) -> Option<(CoverReady, bool)> {
+        let sig = stable_hash(&format!("{}|{what}|{req:?}|{}|{:?}|{:?}", build_stamp(), self.settings.max_texture_size, self.settings.sources, self.lb(id)));
+        if let Some(c) = load_ready(id, what, sig) {
+            return Some((c, false));
+        }
+        self.deps.borrow_mut().clear();
+        NET_TROUBLE.with(|t| t.set(false));
+        let c = make()?;
+        if !NET_TROUBLE.with(|t| t.get()) {
+            let mut paths = std::mem::take(&mut *self.deps.borrow_mut());
+            paths.sort();
+            paths.dedup();
+            // Stamped now, after the job, so files it downloaded count as they are.
+            let deps = paths.into_iter().map(|p| (p.clone(), stamp(&p))).collect();
+            save_ready(what, sig, deps, &c);
+        }
+        Some((c, true))
     }
 }
 
@@ -1005,6 +1224,53 @@ fn finish(id: &str, img: DynamicImage, aspect: f32, max: u32) -> CoverReady {
     let fitted = fit_to_aspect(&rgba, aspect, max);
     let (w, h) = fitted.dimensions();
     CoverReady { id: id.to_string(), width: w, height: h, rgba: fitted.into_raw(), dominant }
+}
+
+/// Cuts a console band printed across the top of a box scan (a strip in the banner's colour
+/// that ends in a clear edge), so the banner drawn over the case replaces it.
+fn strip_banner(img: DynamicImage, bg: [u8; 3]) -> DynamicImage {
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    if w < 32 || h < 64 {
+        return img;
+    }
+    let step = (w / 64).max(1) as usize;
+    let dist = |p: [u8; 3], q: [u8; 3]| -> i32 { (0..3).map(|k| (p[k] as i32 - q[k] as i32).abs()).sum() };
+    let mean = |y0: u32, y1: u32| -> [u8; 3] {
+        let (mut sum, mut n) = ([0u64; 3], 0u64);
+        for y in y0..y1 {
+            for x in (0..w).step_by(step) {
+                let p = rgba.get_pixel(x, y).0;
+                (0..3).for_each(|k| sum[k] += p[k] as u64);
+                n += 1;
+            }
+        }
+        sum.map(|v| (v / n.max(1)) as u8)
+    };
+    // Share of a row's pixels close to `c`.
+    let near = |y: u32, c: [u8; 3]| {
+        let px: Vec<[u8; 3]> = (0..w).step_by(step).map(|x| { let p = rgba.get_pixel(x, y).0; [p[0], p[1], p[2]] }).collect();
+        px.iter().filter(|p| dist(**p, c) < 60).count() as f32 / px.len() as f32
+    };
+    // The band's own colour (scans are printed darker or lighter than the banner) from rows
+    // just below any thin edge at the very top; it has to be the banner's colour, roughly.
+    let band = mean(h / 100, (h * 3 / 100).max(h / 100 + 1));
+    // Black, white and grey bands are not cut: too much art has a dark or light area with the
+    // title in it across the top.
+    let chroma = *band.iter().max().unwrap_or(&0) as i32 - *band.iter().min().unwrap_or(&0) as i32;
+    if dist(band, bg) > 110 || chroma < 60 {
+        return img;
+    }
+    // It ends where three rows in a row have almost none of it (lettering leaves some) ...
+    let Some(end) = (h * 4 / 100..h * 18 / 100).find(|&y| (y..y + 3).all(|r| near(r, band) < 0.15)) else { return img };
+    // ... in a printed edge: a few rows from solid band to art. Art that only starts out in
+    // that colour (a sky, a dark backdrop behind a logo) fades into the rest much more slowly.
+    let last_solid = (0..end).rev().find(|&y| near(y, band) > 0.5).unwrap_or(0);
+    let solid = (0..end).filter(|&y| near(y, band) > 0.35).count() as u32;
+    if end - last_solid > (h * 8 / 1000).max(2) || dist(mean(end, end + 3), band) < 90 || solid * 10 < end * 6 {
+        return img;
+    }
+    img.crop_imm(0, end, w, h - end)
 }
 
 fn has_transparency(img: &RgbaImage) -> bool {
@@ -1432,12 +1698,7 @@ fn steam_assets(agent: &ureq::Agent, appid: u32) -> Option<HashMap<String, Strin
     let input = format!(
         r#"{{"ids":[{{"appid":{appid}}}],"context":{{"language":"english","country_code":"US"}},"data_request":{{"include_assets":true}}}}"#
     );
-    let v: serde_json::Value = agent
-        .get(&format!("https://api.steampowered.com/IStoreBrowseService/GetItems/v1?input_json={}", url_escape(&input)))
-        .call()
-        .ok()?
-        .into_json()
-        .ok()?;
+    let v = http_json(agent, &format!("https://api.steampowered.com/IStoreBrowseService/GetItems/v1?input_json={}", url_escape(&input)), &[], API_TTL)?;
     let assets = v.pointer("/response/store_items/0/assets")?;
     let fmt = assets.get("asset_url_format")?.as_str()?;
     let mut out = HashMap::new();
@@ -1451,12 +1712,7 @@ fn steam_assets(agent: &ureq::Agent, appid: u32) -> Option<HashMap<String, Strin
 
 /// Finds a Steam app id for a PC game from another store (Epic, GOG, ...).
 fn steam_search(agent: &ureq::Agent, title: &str) -> Option<u32> {
-    let v: serde_json::Value = agent
-        .get(&format!("https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US", url_escape(title)))
-        .call()
-        .ok()?
-        .into_json()
-        .ok()?;
+    let v = http_json(agent, &format!("https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US", url_escape(title)), &[], API_TTL)?;
     let want = normalize_title(title);
     v.get("items")?
         .as_array()?
@@ -1483,7 +1739,7 @@ fn libretro_index(agent: &ureq::Agent, cache: &Path, system: &str, kind: &str) -
     let mut names: Vec<String> = if fresh { std::fs::read_to_string(&file).unwrap_or_default().lines().map(str::to_owned).collect() } else { vec![] };
     if names.is_empty() {
         let url = format!("https://thumbnails.libretro.com/{}/{}/", url_escape(system), kind);
-        if let Some(html) = agent.get(&url).call().ok().and_then(|r| r.into_string().ok()) {
+        if let Some(html) = http_get(agent, &url, &[]).and_then(|r| r.into_string().ok()) {
             names = html
                 .split("href=\"")
                 .skip(1)
@@ -1555,7 +1811,7 @@ fn steamgriddb_urls(agent: &ureq::Agent, key: &str, req: &CoverRequest) -> Vec<S
         return vec![];
     }
     let auth = format!("Bearer {}", key.trim());
-    let get = |url: &str| agent.get(url).set("Authorization", &auth).call().ok().and_then(|r| r.into_json::<serde_json::Value>().ok());
+    let get = |url: &str| http_json(agent, url, &[("Authorization", &auth)], API_TTL);
     let game_id: Option<u64> = if let Some(app) = req.steam_appid {
         get(&format!("https://www.steamgriddb.com/api/v2/games/steam/{app}")).and_then(|v| v.pointer("/data/id").and_then(|i| i.as_u64()))
     } else {
@@ -1580,12 +1836,12 @@ fn thegamesdb_urls(agent: &ureq::Agent, key: &str, title: &str) -> Vec<String> {
     if key.trim().is_empty() {
         return vec![];
     }
-    let Some(v) = agent
-        .get(&format!("https://api.thegamesdb.net/v1/Games/ByGameName?apikey={}&name={}&include=boxart", url_escape(key.trim()), url_escape(title)))
-        .call()
-        .ok()
-        .and_then(|r| r.into_json::<serde_json::Value>().ok())
-    else {
+    let Some(v) = http_json(
+        agent,
+        &format!("https://api.thegamesdb.net/v1/Games/ByGameName?apikey={}&name={}&include=boxart", url_escape(key.trim()), url_escape(title)),
+        &[],
+        API_TTL,
+    ) else {
         return vec![];
     };
     let want = normalize_title(title);
@@ -1624,15 +1880,11 @@ fn wikipedia_lookup(agent: &ureq::Agent, title: &str) -> Option<WikiPage> {
     }
     let want = normalize_title(title);
     let q = format!("{title} video game");
-    let found = agent
-        .get(&format!(
-            "https://en.wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrsearch={}&gsrlimit=6&prop=pageimages|description&piprop=thumbnail&pithumbsize=720&pilicense=any",
-            url_escape(&q)
-        ))
-        .call()
-        .ok()
-        .and_then(|r| r.into_json::<serde_json::Value>().ok())
-        .and_then(|v| {
+    let url = format!(
+        "https://en.wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrsearch={}&gsrlimit=6&prop=pageimages|description&piprop=thumbnail&pithumbsize=720&pilicense=any",
+        url_escape(&q)
+    );
+    let found = http_json(agent, &url, &[], API_TTL).and_then(|v| {
             let pages = v.pointer("/query/pages")?.as_object()?.clone();
             pages
                 .values()
@@ -1657,12 +1909,7 @@ fn wikipedia_lookup(agent: &ureq::Agent, title: &str) -> Option<WikiPage> {
 }
 
 fn fetch_steam_meta(agent: &ureq::Agent, app: u32, id: &str) -> Option<MetaReady> {
-    let v: serde_json::Value = agent
-        .get(&format!("https://store.steampowered.com/api/appdetails?appids={app}&l=english&filters=basic,genres,release_date"))
-        .call()
-        .ok()?
-        .into_json()
-        .ok()?;
+    let v = http_json(agent, &format!("https://store.steampowered.com/api/appdetails?appids={app}&l=english&filters=basic,genres,release_date"), &[], API_TTL)?;
     let d = v.get(app.to_string())?.get("data")?;
     let description = d.get("short_description").and_then(|s| s.as_str()).unwrap_or("").to_string();
     let genres = d
@@ -1829,12 +2076,7 @@ pub fn art_candidates(src: &ArtSource) -> Vec<ArtCandidate> {
                 add(key, label, cdn(file));
             }
         }
-        if let Some(v) = agent
-            .get(&format!("https://store.steampowered.com/api/appdetails?appids={app}&filters=screenshots"))
-            .call()
-            .ok()
-            .and_then(|r| r.into_json::<serde_json::Value>().ok())
-        {
+        if let Some(v) = http_json(&agent, &format!("https://store.steampowered.com/api/appdetails?appids={app}&filters=screenshots"), &[], API_TTL) {
             if let Some(a) = v.pointer(&format!("/{app}/data/screenshots")).and_then(|a| a.as_array()) {
                 for (i, s) in a.iter().take(8).enumerate() {
                     if let Some(u) = s.get("path_full").and_then(|u| u.as_str()) {
@@ -1854,6 +2096,7 @@ pub fn art_candidates(src: &ArtSource) -> Vec<ArtCandidate> {
         is_pc: src.libretro_system.is_none(),
         aspect: 0.7,
         want_metadata: false,
+        banner_bg: None,
     };
     for (i, u) in steamgriddb_urls(&agent, &src.sgdb_key, &cr).into_iter().enumerate() {
         add("grid", &format!("SteamGridDB: grid {}", i + 1), u);
@@ -1983,7 +2226,7 @@ impl Worker {
         if !self.settings.enabled {
             return None;
         }
-        let v: serde_json::Value = self.agent.get(&format!("https://store.steampowered.com/api/appdetails?appids={app}")).call().ok()?.into_json().ok()?;
+        let v: serde_json::Value = http_get(&self.agent, &format!("https://store.steampowered.com/api/appdetails?appids={app}"), &[])?.into_json().ok()?;
         let data = v.pointer(&format!("/{app}/data"))?.clone();
         let _ = std::fs::write(&f, serde_json::to_vec(&data).unwrap_or_default());
         Some(data)
@@ -1991,13 +2234,8 @@ impl Worker {
 
     /// Players in the game on Steam at this moment.
     fn players_now(&self, app: u32) -> Option<u64> {
-        let v: serde_json::Value = self
-            .agent
-            .get(&format!("https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={app}"))
-            .call()
-            .ok()?
-            .into_json()
-            .ok()?;
+        // Kept for an hour: the pages are made again whenever the game is opened.
+        let v = http_json(&self.agent, &format!("https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={app}"), &[], Duration::from_secs(3600))?;
         (v.pointer("/response/result").and_then(|r| r.as_u64()) == Some(1)).then(|| v.pointer("/response/player_count").and_then(|c| c.as_u64())).flatten()
     }
 
@@ -2282,5 +2520,43 @@ impl Worker {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+
+    fn scan(band: Option<([u8; 3], u32)>, art: impl Fn(u32, u32) -> [u8; 3]) -> DynamicImage {
+        let mut img = RgbaImage::new(300, 400);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let c = match band {
+                // A band with white lettering in the middle.
+                Some((bg, bh)) if y < bh => if (120..180).contains(&x) && (bh / 3..bh * 2 / 3).contains(&y) { [255; 3] } else { bg },
+                _ => art(x, y),
+            };
+            *p = Rgba([c[0], c[1], c[2], 255]);
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    #[test]
+    fn cuts_printed_band() {
+        let blue = [0x00, 0x50, 0xc8];
+        let out = strip_banner(scan(Some(([0x08, 0x58, 0xc0], 40)), |x, y| [(x % 200) as u8, 90, (y % 120) as u8]), blue);
+        assert_eq!(out.height(), 360);
+    }
+
+    #[test]
+    fn keeps_art_without_band() {
+        let black = [0, 0, 0];
+        // Dark sky fading in: no sharp edge, nothing cut.
+        let sky = scan(None, |_, y| [(y / 3).min(255) as u8; 3]);
+        assert_eq!(strip_banner(sky, black).height(), 400);
+        // A title on a black strip across the top: black bands are never cut.
+        let title = scan(Some(([0, 0, 0], 40)), |x, y| [(x % 200) as u8, 90, (y % 120) as u8]);
+        assert_eq!(strip_banner(title, black).height(), 400);
+        let busy = scan(None, |x, y| [(x * 7 % 255) as u8, (y * 5 % 255) as u8, 120]);
+        assert_eq!(strip_banner(busy, [0x00, 0x50, 0xc8]).height(), 400);
     }
 }

@@ -13,6 +13,7 @@ mod launchbox;
 mod layouts;
 mod library;
 mod platform;
+mod proton;
 mod render;
 mod scanner;
 mod settings;

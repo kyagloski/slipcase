@@ -352,7 +352,7 @@ impl Default for Display {
             field_of_view: 38.0,
             uniform_sizes: false,
             only_favorites: false,
-            loop_list: false,
+            loop_list: true,
             show_uninstalled: false,
             sort: "alphabetical".into(),
             case_corners: "real".into(),
@@ -440,6 +440,8 @@ pub struct Launch {
     pub open_case: bool,
     /// Seconds for the open-the-case animation.
     pub open_duration: f32,
+    /// Proton build for Windows programs on Linux (folder name; empty = the newest installed).
+    pub proton: String,
 }
 
 impl Default for Launch {
@@ -452,6 +454,7 @@ impl Default for Launch {
             recede: true,
             open_case: true,
             open_duration: 2.2,
+            proton: String::new(),
         }
     }
 }

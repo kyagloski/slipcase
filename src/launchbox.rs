@@ -343,6 +343,17 @@ pub fn update(games: Vec<Game>) -> usize {
     n
 }
 
+/// Forgets one game's match, so it is looked up again (e.g. after its platform changed).
+pub fn forget(game_id: &str) {
+    let Ok(mut s) = state().write() else { return };
+    let was = s.checked.remove(game_id) | s.found.remove(game_id).is_some();
+    if was {
+        if let Ok(text) = serde_json::to_vec(&*s) {
+            let _ = std::fs::write(dir().join("matches.json"), text);
+        }
+    }
+}
+
 /// Forget all matches (e.g. to pick up a fresher database).
 #[allow(dead_code)]
 pub fn reset() {
