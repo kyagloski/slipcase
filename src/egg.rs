@@ -40,22 +40,22 @@ struct Piece {
     gone: bool,
 }
 
-struct Sim {
-    bodies: RigidBodySet,
-    colliders: ColliderSet,
-    pipeline: PhysicsPipeline,
-    islands: IslandManager,
-    broad: DefaultBroadPhase,
-    narrow: NarrowPhase,
-    impulse: ImpulseJointSet,
-    multibody: MultibodyJointSet,
-    ccd: CCDSolver,
-    query: QueryPipeline,
-    params: IntegrationParameters,
+pub(crate) struct Sim {
+    pub bodies: RigidBodySet,
+    pub colliders: ColliderSet,
+    pub pipeline: PhysicsPipeline,
+    pub islands: IslandManager,
+    pub broad: DefaultBroadPhase,
+    pub narrow: NarrowPhase,
+    pub impulse: ImpulseJointSet,
+    pub multibody: MultibodyJointSet,
+    pub ccd: CCDSolver,
+    pub query: QueryPipeline,
+    pub params: IntegrationParameters,
 }
 
 impl Sim {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut params = IntegrationParameters::default();
         // The world is in centimetres.
         params.length_unit = 100.0;
@@ -80,8 +80,13 @@ impl Sim {
     }
 
     fn step(&mut self) {
+        self.step_with(GRAVITY);
+    }
+
+    /// One step with gravity `g` (cm/s², along y).
+    pub fn step_with(&mut self, g: f32) {
         self.pipeline.step(
-            &vector![0.0, GRAVITY, 0.0],
+            &vector![0.0, g, 0.0],
             &self.params,
             &mut self.islands,
             &mut self.broad,
@@ -170,20 +175,20 @@ impl Plugin for EggPlugin {
     }
 }
 
-fn to_bevy(iso: &Isometry<f32>) -> (Vec3, Quat) {
+pub(crate) fn to_bevy(iso: &Isometry<f32>) -> (Vec3, Quat) {
     let t = iso.translation.vector;
     let q = iso.rotation.quaternion();
     (Vec3::new(t.x, t.y, t.z), Quat::from_xyzw(q.i, q.j, q.k, q.w))
 }
 
-fn to_iso(pos: Vec3, rot: Quat) -> Isometry<f32> {
+pub(crate) fn to_iso(pos: Vec3, rot: Quat) -> Isometry<f32> {
     let q = UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z));
     Isometry::from_parts(vector![pos.x, pos.y, pos.z].into(), q)
 }
 
 /// Counts Ctrl presses (five in a row, a second or so apart at most, starts it) and, while it
 /// runs, keeps every other action away from the launcher; Esc / Backspace / Q stop it.
-pub fn egg_input(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut egg: ResMut<Egg>, mut actions: ResMut<Actions>) {
+pub fn egg_input(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, time: Res<Time>, mut egg: ResMut<Egg>, mut actions: ResMut<Actions>) {
     let now = time.elapsed_seconds();
     if egg.active() {
         if actions.0.iter().any(|a| matches!(a, Action::Quit | Action::CloseCase)) {
@@ -204,7 +209,8 @@ pub fn egg_input(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut egg: ResM
         return;
     }
     let ctrl = keys.any_just_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    let other = keys.get_just_pressed().any(|k| !matches!(k, KeyCode::ControlLeft | KeyCode::ControlRight));
+    // A click in between (Ctrl + drag picks a game up, see `toss`) is not a run of taps.
+    let other = keys.get_just_pressed().any(|k| !matches!(k, KeyCode::ControlLeft | KeyCode::ControlRight)) || mouse.get_just_pressed().next().is_some();
     if other {
         egg.shifts.clear();
     }

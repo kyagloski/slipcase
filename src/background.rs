@@ -485,7 +485,7 @@ fn update_background(
         }
     }
     if let Some(m) = mask.and_then(|m| mask_mats.get_mut(&m.0)) {
-        let p = Vec4::new(w / h, cfg.background.overlay_halfway_size.clamp(0.2, 1.5), 0.0, 0.0);
+        let p = Vec4::new(w / h, cfg.background.overlay_halfway_size.clamp(0.2, 1.5), cfg.background.overlay_halfway_opacity.clamp(0.0, 1.0), 0.0);
         if m.params != p {
             m.params = p;
         }

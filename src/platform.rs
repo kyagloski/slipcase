@@ -221,7 +221,7 @@ impl Platform {
             Platform::Pc => Geometry::case(dvd, Media::Disc { diameter: 12.0 }),
             Platform::Gb | Platform::Gbc => Geometry::case((12.5, 12.5, 2.4), Media::Cart { w: 5.7, h: 6.5, d: 0.8 }),
             Platform::Gba => Geometry::case((12.0, 12.0, 2.4), Media::Cart { w: 5.7, h: 3.5, d: 0.8 }),
-            Platform::Nds | Platform::N3ds => Geometry::case((12.5, 13.7, 1.4), Media::Cart { w: 3.5, h: 3.3, d: 0.38 }),
+            Platform::Nds | Platform::N3ds => Geometry::case((13.1, 13.7, 1.4), Media::Cart { w: 3.5, h: 3.3, d: 0.38 }),
             Platform::Nes => Geometry::case((13.0, 17.5, 4.2), Media::Cart { w: 12.0, h: 13.3, d: 2.0 }),
             Platform::Snes => Geometry::case((18.4, 13.0, 3.8), Media::Cart { w: 12.0, h: 10.4, d: 2.0 }),
             Platform::N64 => Geometry::case((19.0, 13.4, 4.8), Media::Cart { w: 11.6, h: 7.6, d: 1.9 }),
@@ -300,35 +300,44 @@ impl Platform {
 
     /// The console's banner printed across the top of the cover and spine (None: no banner).
     /// Plain lettering in the console's colours, not the trademarked logos.
+    /// The band printed across the top of the console's covers, after the real ones: logo
+    /// lettering on the left (in its own colours), the band's shading and the emblem beside it.
     pub fn banner(self) -> Option<Banner> {
-        let b = |text, bg, fg, line| Some(Banner { text, bg, fg, line });
-        match self {
-            Platform::Xbox => b("XBOX", 0x0d0d0d, 0x8fd44a, Some(0x52b043)),
-            Platform::Xbox360 => b("XBOX 360", 0xf4f4f4, 0x5a9e2c, Some(0x7cbf3f)),
-            Platform::XboxOne => b("XBOX ONE", 0x107c10, 0xffffff, None),
-            Platform::Ps1 => b("PlayStation", 0x000000, 0xffffff, None),
-            Platform::Ps2 => b("PlayStation 2", 0x000000, 0xffffff, Some(0x1f5fd6)),
-            Platform::Ps3 => b("PS3", 0x050505, 0xffffff, None),
-            Platform::Ps4 => b("PS4", 0x0050c8, 0xffffff, None),
-            Platform::Ps5 => b("PS5", 0xffffff, 0x101010, None),
-            Platform::Psp => b("PSP", 0x0a0a0a, 0xffffff, None),
-            Platform::Vita => b("PS VITA", 0x003a8c, 0xffffff, None),
-            Platform::Gamecube => b("NINTENDO GAMECUBE", 0x0a0a0a, 0xffffff, Some(0x6a4fb3)),
-            Platform::Wii => b("Wii", 0xf2f2f2, 0x8a8a8a, Some(0x3aa0d8)),
-            Platform::Switch => b("NINTENDO SWITCH", 0xe60012, 0xffffff, None),
-            Platform::Nds => b("NINTENDO DS", 0xe6e6e6, 0x303030, None),
-            Platform::N3ds => b("NINTENDO 3DS", 0xffffff, 0xce1020, None),
-            Platform::Nes => b("NINTENDO ENTERTAINMENT SYSTEM", 0x101010, 0xffffff, Some(0xd02020)),
-            Platform::Snes => b("SUPER NINTENDO", 0xbdbdc4, 0x3a2f7a, None),
-            Platform::N64 => b("NINTENDO 64", 0x0a0a0a, 0xffffff, Some(0x1f8f3a)),
-            Platform::Gb => b("GAME BOY", 0x8b8b92, 0xffffff, None),
-            Platform::Gbc => b("GAME BOY COLOR", 0x2a2a2e, 0xffffff, Some(0xe0b020)),
-            Platform::Gba => b("GAME BOY ADVANCE", 0x4b3c8c, 0xffffff, None),
-            Platform::Genesis => b("SEGA GENESIS", 0x000000, 0xffffff, Some(0xc81e1e)),
-            Platform::Saturn => b("SEGA SATURN", 0x000000, 0xffffff, None),
-            Platform::Dreamcast => b("DREAMCAST", 0xffffff, 0xe86a10, None),
-            Platform::Pc | Platform::Other => None,
-        }
+        use Mark::{Cube, Orb, Swirl, Switch};
+        const NO: Mark = Mark::None;
+        const W: u32 = 0xffffff;
+        let b = |text, bg, bg2, mark, line| Some(Banner { text, bg, bg2, mark, line, side: false });
+        // Down the left edge on these, across the top on the rest.
+        let side = matches!(self, Platform::Nds | Platform::Ps1 | Platform::Saturn);
+        let banner = match self {
+            Platform::Xbox => b(&[("XBOX", 0x9bd437)], 0x0b0b0b, Some(0x1d3a12), Orb(0x5cb82e, 0x0b0b0b), Some(0x52b043)),
+            Platform::Xbox360 => b(&[("XBOX ", 0x6a6a6a), ("360", 0x5a9e2c)], 0xfdfdfd, Some(0xd9dbdc), Orb(0x7cbf3f, W), None),
+            Platform::XboxOne => b(&[("XBOX ONE", W)], 0x16891a, Some(0x0e6b10), Orb(W, 0x107c10), None),
+            Platform::Ps1 => b(&[("PlayStation", W)], 0x000000, None, NO, None),
+            Platform::Ps2 => b(&[("PlayStation", W), (" 2", W)], 0x000000, Some(0x141414), NO, None),
+            Platform::Ps3 => b(&[("PS3", W)], 0x3a3a3a, Some(0x050505), NO, None),
+            Platform::Ps4 => b(&[("PS4", W)], 0x0c62d4, Some(0x003791), NO, None),
+            Platform::Ps5 => b(&[("PS5", 0x101010)], 0xffffff, None, NO, None),
+            Platform::Psp => b(&[("PSP", W)], 0x1a1a1a, Some(0x000000), NO, None),
+            Platform::Vita => b(&[("PS ", W), ("VITA", W)], 0x1a6fd8, Some(0x003087), NO, None),
+            Platform::Gamecube => b(&[("NINTENDO ", W), ("GAMECUBE", W)], 0x0a0a0a, None, Cube(0x6a4fb3), Some(0x6a4fb3)),
+            Platform::Wii => b(&[("Wii", 0x9a9a9a)], 0xffffff, Some(0xf0f0f0), NO, Some(0xc8c8c8)),
+            Platform::Switch => b(&[("NINTENDO ", W), ("SWITCH", W)], 0xe60012, None, Switch(W), None),
+            Platform::Nds => b(&[("NINTENDO ", 0x8a8a8a), ("DS", 0x1e1e1e)], 0xf2f2f2, Some(0xd2d4d8), NO, None),
+            Platform::N3ds => b(&[("NINTENDO ", 0x8a8a8a), ("3DS", 0xce1020)], 0xffffff, Some(0xececec), NO, None),
+            Platform::Nes => b(&[("NINTENDO ENTERTAINMENT SYSTEM", W)], 0x101010, None, NO, Some(0xd02020)),
+            Platform::Snes => b(&[("SUPER NINTENDO", 0x3a2f7a)], 0xc4c4cc, Some(0xa8a8b2), NO, None),
+            Platform::N64 => b(&[("NINTENDO", W), ("64", 0x2fb84a)], 0x0a0a0a, None, NO, Some(0x1f8f3a)),
+            Platform::Gb => b(&[("GAME BOY", W)], 0x8b8b92, Some(0x74747c), NO, None),
+            Platform::Gbc => b(&[("GAME BOY ", W), ("C", 0xe8363a), ("O", 0x9b4fd0), ("L", 0x3fbf3f), ("O", 0xf2c21b), ("R", 0x3b7ee8)], 0x2a2a2e, None, NO, None),
+            Platform::Gba => b(&[("GAME BOY ", W), ("ADVANCE", 0xc9c3ff)], 0x5444a0, Some(0x3a2d7c), NO, None),
+            Platform::Genesis => b(&[("SEGA ", 0x2a6ee8), ("GENESIS", W)], 0x000000, None, NO, Some(0xc81e1e)),
+            Platform::Saturn => b(&[("SEGA ", 0x2a6ee8), ("SATURN", W)], 0x000000, Some(0x101018), NO, None),
+            Platform::Dreamcast => b(&[("Dreamcast", 0x303030)], 0xffffff, None, Swirl(0xe86a10), None),
+            Platform::Pc => b(&[("PC ", W), ("DVD-ROM", 0xb4b4b4)], 0x1c1c1c, Some(0x000000), NO, None),
+            Platform::Other => None,
+        };
+        banner.map(|b| Banner { side, ..b })
     }
 
     /// Cartridges famous for their own colour, by title, for when no photo of the cartridge
@@ -429,10 +438,31 @@ pub const UMD_SIZE: (f32, f32, f32) = (6.4, 6.5, 0.42);
 /// A console banner: lettering on a coloured band, with an optional thin line under it.
 #[derive(Debug, Clone, Copy)]
 pub struct Banner {
-    pub text: &'static str,
+    /// The lettering, in pieces with their own colours.
+    pub text: &'static [(&'static str, u32)],
+    /// Band colour, and the colour it shades to at the bottom.
     pub bg: u32,
-    pub fg: u32,
+    pub bg2: Option<u32>,
+    /// Emblem before the lettering.
+    pub mark: Mark,
+    /// Accent line along the bottom (the inner edge of a side banner).
     pub line: Option<u32>,
+    /// Runs down the left edge of the cover, read bottom to top, instead of across the top.
+    pub side: bool,
+}
+
+/// Simple console emblems drawn beside a banner's lettering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mark {
+    None,
+    /// Sphere with an X across it (fill, X colour).
+    Orb(u32, u32),
+    /// Two joined halves, one solid and one outlined, each with a dot.
+    Switch(u32),
+    /// Spiral.
+    Swirl(u32),
+    /// Cube seen corner on.
+    Cube(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

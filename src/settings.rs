@@ -44,6 +44,8 @@ enum Effect {
     Uninstalled,
     /// Potato mode: covers at the new texture size, items rebuilt without the costly extras.
     Potato,
+    /// The UI scale: its slider takes effect when let go (see `Menu::ui_scale_hold`).
+    UiScale,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,7 +54,6 @@ enum Act {
     AddFolder,
     AddRomFolder,
     Rescan,
-    SetCover,
     RefetchCover,
     ChooseArt,
     BackgroundImage,
@@ -93,6 +94,9 @@ enum Kind {
     Note(&'static str),
     /// Shows / hides the advanced settings of the category with this header.
     Advanced(&'static str),
+    /// Opens / folds a group of settings inside a category: the entries after it, up to the
+    /// next header.
+    Sub(&'static str),
     /// A colour (hex string), set with the colour picker.
     Color(fn(&mut ConfigData) -> &mut String),
 }
@@ -164,6 +168,8 @@ macro_rules! options {
 }
 
 const HIDDEN_HEADER: &str = "Hidden games";
+/// The cover download settings, a group inside "Cases and discs".
+const SUB_COVERS: &str = "Covers";
 
 /// Every named category header (the ones that can be folded).
 fn category_headers() -> Vec<&'static str> {
@@ -216,12 +222,9 @@ fn entries() -> Vec<Entry> {
         Entry { label: "Proton version", kind: Kind::GameProton, effect: Effect::None, advanced: false },
         Entry { label: "Proton options (e.g. PROTON_ENABLE_NVAPI=1)", kind: Kind::GameProtonOptions, effect: Effect::None, advanced: true },
         Entry { label: "Choose art (cover, disc, insert)...", kind: Kind::Act(Act::ChooseArt), effect: Effect::None, advanced: false },
-        Entry { label: "Choose cover image...", kind: Kind::Act(Act::SetCover), effect: Effect::None, advanced: true },
         Entry { label: "Download cover again", kind: Kind::Act(Act::RefetchCover), effect: Effect::None, advanced: true },
         Entry { label: "Hide this game", kind: Kind::Act(Act::HideGame), effect: Effect::None, advanced: false },
         Entry { label: "Remove from library (added by hand)", kind: Kind::Act(Act::RemoveGame), effect: Effect::None, advanced: false },
-        // Filled in from the library, see `hidden_entries`.
-        header!(HIDDEN_HEADER),
         header!("Layout"),
         Entry {
             label: "Layout",
@@ -247,6 +250,7 @@ fn entries() -> Vec<Entry> {
         toggle!("Show games that are not installed", display.show_uninstalled, Effect::Uninstalled),
         num!("Item size", display.item_scale, 0.4, 2.5, 0.05, Effect::View),
         num!("Zoom", display.zoom, 0.45, 4.0, 0.05, Effect::Zoom),
+        num!("Selected game distance", display.selected_distance, 15.0, 90.0, 1.0, Effect::None),
         adv(num!("Spacing", display.spacing_scale, 0.4, 2.5, 0.05, Effect::View)),
         adv(num!("Field of view", display.field_of_view, 15.0, 90.0, 1.0, Effect::None)),
         adv(toggle!("Same size for every case", display.uniform_sizes, Effect::Respawn)),
@@ -260,6 +264,9 @@ fn entries() -> Vec<Entry> {
         ),
         adv(num!("Highlight width (cm)", display.highlight_width, 0.04, 1.0, 0.02, Effect::Respawn)),
         adv(toggle!("Lean away from the mouse", display.hover_tilt, Effect::None)),
+        adv(num!("Lean away strength", display.hover_tilt_strength, 0.0, 3.0, 0.1, Effect::None)),
+        toggle!("Show key hints", general.show_hints, Effect::None),
+        adv(toggle!("Show description", general.show_info, Effect::None)),
         header!("Cases and discs"),
         options!("Spines", display.spine_style, ["auto", "generated", "simple"], Effect::Respawn),
         toggle!("Console banners", display.platform_banners, Effect::Respawn),
@@ -270,6 +277,18 @@ fn entries() -> Vec<Entry> {
         adv(num!("Disc rainbow", display.disc_rainbow, 0.0, 3.0, 0.1, Effect::Respawn)),
         adv(num!("Disc sticking out of case", display.disc_peek, 0.0, 0.9, 0.02, Effect::Respawn)),
         adv(toggle!("Rainbow cases", display.rainbow_cases, Effect::Rainbow)),
+        // The cover downloads, as a group of their own at the end of the case settings.
+        Entry { label: SUB_COVERS, kind: Kind::Sub(SUB_COVERS), effect: Effect::None, advanced: false },
+        toggle!("Download covers", covers.enabled, Effect::Covers),
+        Entry { label: "Steam", kind: Kind::Source("steam"), effect: Effect::Covers, advanced: true },
+        Entry { label: "LaunchBox (spines, backs, discs)", kind: Kind::Source("launchbox"), effect: Effect::Covers, advanced: true },
+        Entry { label: "libretro thumbnails", kind: Kind::Source("libretro"), effect: Effect::Covers, advanced: true },
+        Entry { label: "Wikipedia", kind: Kind::Source("wikipedia"), effect: Effect::Covers, advanced: true },
+        Entry { label: "SteamGridDB", kind: Kind::Source("steamgriddb"), effect: Effect::Covers, advanced: true },
+        adv(text!("SteamGridDB API key", covers.steamgriddb_api_key, Effect::Covers)),
+        Entry { label: "TheGamesDB", kind: Kind::Source("thegamesdb"), effect: Effect::Covers, advanced: true },
+        adv(text!("TheGamesDB API key", covers.thegamesdb_api_key, Effect::Covers)),
+        adv(toggle!("Descriptions and genres", covers.fetch_metadata, Effect::Covers)),
         header!("Background"),
         Entry {
             label: "Style",
@@ -292,6 +311,7 @@ fn entries() -> Vec<Entry> {
         toggle!("Overlay: no window or background", general.overlay, Effect::Restart),
         toggle!("Overlay halfway: background fades out from the middle", background.overlay_halfway, Effect::None),
         adv(num!("Halfway background size", background.overlay_halfway_size, 0.2, 1.5, 0.05, Effect::None)),
+        adv(num!("Halfway background opacity", background.overlay_halfway_opacity, 0.0, 1.0, 0.05, Effect::None)),
         adv(num!("Animation speed", background.speed, 0.0, 4.0, 0.1, Effect::None)),
         adv(num!("Intensity", background.intensity, 0.0, 2.0, 0.05, Effect::None)),
         header!("Launching"),
@@ -307,29 +327,20 @@ fn entries() -> Vec<Entry> {
         toggle!("Close after launching", general.close_on_launch, Effect::None),
         header!("Motion"),
         num!("Speed", animation.speed, 0.2, 4.0, 0.1, Effect::None),
+        options!("Selection motion", animation.motion, ["direct", "flip", "tumble", "roll", "dip", "swoop"], Effect::None),
         adv(num!("Scroll speed", animation.scroll_speed, 0.2, 4.0, 0.1, Effect::None)),
         adv(num!("Idle sway", animation.idle_sway, 0.0, 3.0, 0.1, Effect::None)),
         adv(num!("Spin selected (deg/s)", animation.spin, 0.0, 180.0, 5.0, Effect::None)),
-        header!("Covers"),
-        toggle!("Download covers", covers.enabled, Effect::Covers),
-        Entry { label: "Steam", kind: Kind::Source("steam"), effect: Effect::Covers, advanced: true },
-        Entry { label: "LaunchBox (spines, backs, discs)", kind: Kind::Source("launchbox"), effect: Effect::Covers, advanced: true },
-        Entry { label: "libretro thumbnails", kind: Kind::Source("libretro"), effect: Effect::Covers, advanced: true },
-        Entry { label: "Wikipedia", kind: Kind::Source("wikipedia"), effect: Effect::Covers, advanced: true },
-        Entry { label: "SteamGridDB", kind: Kind::Source("steamgriddb"), effect: Effect::Covers, advanced: true },
-        adv(text!("SteamGridDB API key", covers.steamgriddb_api_key, Effect::Covers)),
-        Entry { label: "TheGamesDB", kind: Kind::Source("thegamesdb"), effect: Effect::Covers, advanced: true },
-        adv(text!("TheGamesDB API key", covers.thegamesdb_api_key, Effect::Covers)),
-        adv(toggle!("Descriptions and genres", covers.fetch_metadata, Effect::Covers)),
         header!("Screen"),
         toggle!("Fullscreen", general.fullscreen, Effect::Window),
         adv(toggle!("Vsync", general.vsync, Effect::Window)),
         toggle!("Potato mode (much faster, plainer looks)", general.potato, Effect::Potato),
         num!("Brightness", general.brightness, 0.2, 3.0, 0.05, Effect::None),
+        num!("UI scale", general.ui_scale, 0.5, 2.0, 0.05, Effect::UiScale),
         adv(toggle!("Shadows", general.shadows, Effect::None)),
         adv(num!("FPS in background (0 = paused)", general.background_fps, 0.0, 30.0, 1.0, Effect::Window)),
-        toggle!("Show key hints", general.show_hints, Effect::None),
-        adv(toggle!("Show description", general.show_info, Effect::None)),
+        // Filled in from the library, see `hidden_entries`.
+        header!(HIDDEN_HEADER),
     ]
 }
 
@@ -341,7 +352,6 @@ enum Picked {
     Files(Vec<PathBuf>),
     Folder(PathBuf),
     RomFolder(PathBuf, Option<Platform>),
-    Cover(String, PathBuf),
     Location(String, PathBuf),
     Background(PathBuf),
 }
@@ -384,6 +394,13 @@ pub struct Menu {
     remove_row: bool,
     /// Remove was pressed once for this game: a second press before the time removes it.
     remove_armed: Option<(String, std::time::Instant)>,
+    /// The number setting (entry index) whose slider is being dragged.
+    slider_drag: Option<usize>,
+    /// Groups inside categories that are open (see `Kind::Sub`).
+    open_subs: Vec<&'static str>,
+    /// The UI scale in use while its slider is dragged (the menu would resize under the
+    /// cursor otherwise); the new one applies when the slider is let go.
+    pub ui_scale_hold: Option<f32>,
 }
 
 impl Menu {
@@ -414,6 +431,9 @@ impl Menu {
 impl Default for Menu {
     fn default() -> Self {
         Menu {
+            slider_drag: None,
+            open_subs: Vec::new(),
+            ui_scale_hold: None,
             open: false,
             just_closed: false,
             index: 0,
@@ -522,16 +542,40 @@ struct MenuCloseBtn;
 #[derive(Component)]
 struct ArrowBtn(usize, i32);
 
+/// The slider on a number row: the track (clicked and dragged), its filled part and knob.
+#[derive(Component)]
+struct SliderTrack(usize);
+#[derive(Component)]
+struct SliderFill(usize);
+#[derive(Component)]
+struct SliderKnob(usize);
+
+/// Width of a slider's track.
+const SLIDER_W: f32 = 150.0;
+
 /// The box holding a row's value (fixed width on rows with arrows).
 #[derive(Component)]
 struct RowValueBox(usize);
 
 /// Rows with arrows get a value box of fixed width, so the arrows do not move as the value
 /// changes length.
-fn size_value_boxes(arrows: Query<(&ArrowBtn, &Style), Without<RowValueBox>>, mut boxes: Query<(&RowValueBox, &mut Style), Without<ArrowBtn>>) {
+/// Rows with a slider get a narrow one for the number beside it.
+#[allow(clippy::type_complexity)]
+fn size_value_boxes(
+    arrows: Query<(&ArrowBtn, &Style), (Without<RowValueBox>, Without<SliderTrack>)>,
+    sliders: Query<(&SliderTrack, &Style), (Without<RowValueBox>, Without<ArrowBtn>)>,
+    mut boxes: Query<(&RowValueBox, &mut Style), (Without<ArrowBtn>, Without<SliderTrack>)>,
+) {
     for (b, mut style) in &mut boxes {
         let arrows_shown = arrows.iter().any(|(a, s)| a.0 == b.0 && s.display != Display::None);
-        let w = if arrows_shown { Val::Px(190.0) } else { Val::Auto };
+        let slider_shown = sliders.iter().any(|(t, s)| t.0 == b.0 && s.display != Display::None);
+        let w = if arrows_shown {
+            Val::Px(190.0)
+        } else if slider_shown {
+            Val::Px(58.0)
+        } else {
+            Val::Auto
+        };
         if style.width != w {
             style.width = w;
         }
@@ -547,6 +591,7 @@ impl Plugin for SettingsPlugin {
             .add_systems(Update, (art_pick_input, draw_art_picker).chain().after(menu_input))
             .add_systems(Update, draw_menu_icons.after(draw_menu))
             .add_systems(Update, size_value_boxes.after(draw_menu))
+            .add_systems(Update, draw_sliders.after(draw_menu))
             .add_systems(Update, (menu_input, color_pick_input, menu_pickers, draw_menu, draw_edit_dialog, draw_restart_prompt, draw_color_picker).chain());
     }
 }
@@ -688,7 +733,7 @@ fn spawn_menu(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
             .with_children(|b| {
                 b.spawn(txt(&f.regular, 22.0, DIM, "X"));
             });
-            let mut h = txt(&f.regular, 14.0, DIM, "Up / Down to move, Left / Right to change, Enter to edit, Esc to close");
+            let mut h = txt(&f.regular, 14.0, DIM, "Up / Down to move, Left / Right or drag to change, Enter to edit, Esc to close");
             h.style.margin = UiRect { top: Val::Px(2.0), bottom: Val::Px(12.0), ..default() };
             p.spawn(h);
             // The list takes all the height between the title and the bottom bar and clips what
@@ -771,6 +816,47 @@ fn spawn_menu(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                                         b.spawn(txt(&f.bold, 16.0, ACCENT, if dir < 0 { "<" } else { ">" }));
                                     });
                                 };
+                                // Number rows: a slider, with the number beside it.
+                                v.spawn((
+                                    ButtonBundle {
+                                        style: Style { width: Val::Px(SLIDER_W), height: Val::Px(24.0), margin: UiRect::right(Val::Px(6.0)), align_items: AlignItems::Center, display: Display::None, ..default() },
+                                        background_color: BackgroundColor(Color::NONE),
+                                        ..default()
+                                    },
+                                    bevy::ui::RelativeCursorPosition::default(),
+                                    SliderTrack(i),
+                                ))
+                                .with_children(|t| {
+                                    t.spawn(NodeBundle {
+                                        style: Style { width: Val::Percent(100.0), height: Val::Px(4.0), ..default() },
+                                        background_color: BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.16)),
+                                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                                        focus_policy: bevy::ui::FocusPolicy::Pass,
+                                        ..default()
+                                    })
+                                    .with_children(|bar| {
+                                        bar.spawn((
+                                            NodeBundle {
+                                                style: Style { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() },
+                                                background_color: BackgroundColor(ACCENT),
+                                                border_radius: BorderRadius::all(Val::Px(2.0)),
+                                                focus_policy: bevy::ui::FocusPolicy::Pass,
+                                                ..default()
+                                            },
+                                            SliderFill(i),
+                                        ));
+                                    });
+                                    t.spawn((
+                                        NodeBundle {
+                                            style: Style { position_type: PositionType::Absolute, width: Val::Px(14.0), height: Val::Px(14.0), margin: UiRect::left(Val::Px(-7.0)), left: Val::Percent(0.0), ..default() },
+                                            background_color: BackgroundColor(Color::WHITE),
+                                            border_radius: BorderRadius::all(Val::Px(7.0)),
+                                            focus_policy: bevy::ui::FocusPolicy::Pass,
+                                            ..default()
+                                        },
+                                        SliderKnob(i),
+                                    ));
+                                });
                                 arrow(v, -1);
                                 // The value sits in a box of fixed width when the row has arrows,
                                 // so the arrows stay put whatever the option's length.
@@ -836,6 +922,7 @@ struct EditInput<'w, 's> {
     buttons: Query<'w, 's, (&'static EditBtn, &'static Interaction)>,
     fonts: Res<'w, MenuFonts>,
     restart: Query<'w, 's, (&'static RestartBtn, &'static Interaction)>,
+    sliders: Query<'w, 's, (&'static SliderTrack, &'static Interaction, &'static bevy::ui::RelativeCursorPosition)>,
 }
 
 /// Restart (true) / Later (false) in the restart question.
@@ -1075,6 +1162,7 @@ fn draw_edit_dialog(
     rows: Query<(&MenuRow, &GlobalTransform, &Node)>,
     field: Query<&Node, With<EditField>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    ui_scale: Res<UiScale>,
 ) {
     let open = menu.editing.is_some();
     for mut s in &mut dialog {
@@ -1090,7 +1178,7 @@ fn draw_edit_dialog(
     let row = menu.index.saturating_sub(menu.scroll);
     if let Some((_, gt, node)) = rows.iter().find(|(r, ..)| r.0 == row) {
         let (c, size) = (gt.translation().truncate(), node.size());
-        let win_h = windows.get_single().map(|w| w.height()).unwrap_or(1080.0);
+        let win_h = windows.get_single().map(|w| w.height()).unwrap_or(1080.0) / ui_scale.0;
         let top = (c.y - size.y * 0.5 - EDIT_FIELD_TOP).clamp(8.0, (win_h - 120.0).max(8.0));
         for mut s in &mut boxes {
             s.left = Val::Px(c.x - size.x * 0.5 - 8.0);
@@ -1212,13 +1300,13 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
         Kind::HiddenGame(_) => "Unhide".into(),
         Kind::HiddenTitle(_) => "Unhide (not found yet)".into(),
         Kind::Note(_) => String::new(),
-        Kind::Advanced(_) => String::new(),
+        Kind::Advanced(_) | Kind::Sub(_) => String::new(),
     }
 }
 
-/// Entries changed with < and >.
+/// Entries changed with < and > (numbers have a slider instead).
 fn has_arrows(e: &Entry) -> bool {
-    matches!(e.kind, Kind::Num { .. } | Kind::Choice { .. } | Kind::RomPlatform | Kind::GamePlatform | Kind::GameProton | Kind::ProtonDefault)
+    matches!(e.kind, Kind::Choice { .. } | Kind::RomPlatform | Kind::GamePlatform | Kind::GameProton | Kind::ProtonDefault)
 }
 
 /// Text in the label column: hidden games show their title.
@@ -1230,7 +1318,9 @@ fn label_text(e: &Entry, lib: &Library, menu: &Menu) -> String {
         // + to open, - to fold.
         Kind::Header if e.label.is_empty() => String::new(),
         Kind::Header => format!("{}   {}", e.label, if menu.collapsed.contains(&e.label) { "+" } else { "-" }),
+        Kind::Advanced(h) if *h == SUB_COVERS => format!("Advanced cover settings   {}", if menu.expanded.contains(h) { "-" } else { "+" }),
         Kind::Advanced(h) => format!("Advanced settings   {}", if menu.expanded.contains(h) { "-" } else { "+" }),
+        Kind::Sub(n) => format!("{n}   {}", if menu.open_subs.contains(n) { "-" } else { "+" }),
         _ => e.label.to_string(),
     }
 }
@@ -1286,7 +1376,10 @@ fn draw_menu(
         if style.margin.top != top {
             style.margin.top = top;
         }
-        let left = Val::Px(if e.is_some_and(|e| e.advanced) { 26.0 } else { 10.0 });
+        // Rows inside a group (after a `Kind::Sub` row, before the next heading) one step further.
+        let in_sub = !heading && menu.entries[..i.min(menu.entries.len())].iter().rev().take_while(|e| !matches!(e.kind, Kind::Header)).any(|e| matches!(e.kind, Kind::Sub(_)));
+        let steps = e.is_some_and(|e| e.advanced) as u8 + in_sub as u8;
+        let left = Val::Px(10.0 + 16.0 * steps as f32);
         if style.padding.left != left {
             style.padding.left = left;
         }
@@ -1392,6 +1485,75 @@ fn draw_menu(
     }
 }
 
+/// Where a number setting sits between its least and most, 0..1.
+fn num_frac(e: &Entry, cfg: &mut ConfigData) -> Option<f32> {
+    match &e.kind {
+        Kind::Num { f, min, max, .. } => Some(((*f(cfg) - min) / (max - min).max(1e-6)).clamp(0.0, 1.0)),
+        _ => None,
+    }
+}
+
+/// Shows the sliders on number rows, filled up to the value.
+#[allow(clippy::type_complexity)]
+fn draw_sliders(
+    menu: Res<Menu>,
+    mut cfg: ResMut<Config>,
+    mut tracks: Query<(&SliderTrack, &Interaction, &mut Style), (Without<SliderFill>, Without<SliderKnob>)>,
+    mut fills: Query<(&SliderFill, &mut Style), (Without<SliderTrack>, Without<SliderKnob>)>,
+    mut knobs: Query<(&SliderKnob, &mut Style, &mut BackgroundColor), (Without<SliderTrack>, Without<SliderFill>)>,
+) {
+    if !menu.open {
+        return;
+    }
+    let cfg = &mut cfg.bypass_change_detection().data;
+    let frac = |row: usize, cfg: &mut ConfigData| if row < menu.rows { menu.entries.get(menu.scroll + row).and_then(|e| num_frac(e, cfg)) } else { None };
+    let mut hot = Vec::new();
+    for (t, interaction, mut style) in &mut tracks {
+        let d = if frac(t.0, cfg).is_some() { Display::Flex } else { Display::None };
+        if style.display != d {
+            style.display = d;
+        }
+        if *interaction != Interaction::None || menu.slider_drag.is_some_and(|i| i == menu.scroll + t.0) {
+            hot.push(t.0);
+        }
+    }
+    for (f, mut style) in &mut fills {
+        let w = Val::Percent(frac(f.0, cfg).unwrap_or(0.0) * 100.0);
+        if style.width != w {
+            style.width = w;
+        }
+    }
+    for (k, mut style, mut bg) in &mut knobs {
+        let l = Val::Percent(frac(k.0, cfg).unwrap_or(0.0) * 100.0);
+        if style.left != l {
+            style.left = l;
+        }
+        bg.0 = if hot.contains(&k.0) { ACCENT } else { Color::WHITE };
+    }
+}
+
+/// Sets a number setting from a spot along its slider (0..1), on its step. Settings that
+/// rebuild the games or the window are only applied when `done` (the slider is let go).
+fn slide_to(menu: &mut Menu, ctx: &mut Ctx, i: usize, x: f32, done: bool) {
+    let Some(e) = menu.entries.get(i) else { return };
+    let Kind::Num { f, min, max, step } = e.kind else { return };
+    let effect = e.effect;
+    let v = f(&mut ctx.cfg.data);
+    let want = ((min + x.clamp(0.0, 1.0) * (max - min)) / step).round() * step;
+    let want = want.clamp(min, max);
+    let changed = (*v - want).abs() > step * 0.01;
+    if effect == Effect::UiScale {
+        menu.ui_scale_hold = if done { None } else { menu.ui_scale_hold.or(Some(*v)) };
+    }
+    if changed {
+        *v = want;
+    }
+    let heavy = matches!(effect, Effect::Respawn | Effect::Window | Effect::Potato | Effect::Restart);
+    if (changed && !heavy) || (done && heavy) {
+        apply(ctx, effect);
+    }
+}
+
 // ------------------------------------------------------------------------------------------------
 // Input
 // ------------------------------------------------------------------------------------------------
@@ -1422,6 +1584,7 @@ fn keep_visible(menu: &mut Menu) {
 /// Everything a menu change may need to touch.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Ctx<'w, 's> {
+    ui_scale: Res<'w, UiScale>,
     cfg: ResMut<'w, Config>,
     lib: ResMut<'w, Library>,
     view: ResMut<'w, ViewState>,
@@ -1437,7 +1600,7 @@ struct Ctx<'w, 's> {
 fn apply(ctx: &mut Ctx, effect: Effect) {
     ctx.persist.mark_cfg();
     match effect {
-        Effect::None => {}
+        Effect::None | Effect::UiScale => {}
         Effect::View => ctx.view.dirty = true,
         Effect::Uninstalled => {
             ctx.view.dirty = true;
@@ -1655,6 +1818,19 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 keep_visible(menu);
             }
         }
+        Kind::Sub(n) => {
+            let n = *n;
+            if let Some(p) = menu.open_subs.iter().position(|x| *x == n) {
+                menu.open_subs.remove(p);
+            } else {
+                menu.open_subs.push(n);
+            }
+            rebuild_entries(menu, &ctx.lib, &ctx.cfg);
+            if let Some(i) = menu.entries.iter().position(|e| matches!(e.kind, Kind::Sub(x) if x == n)) {
+                menu.index = i;
+                keep_visible(menu);
+            }
+        }
         Kind::RomPlatform => {
             let mut opts: Vec<Option<Platform>> = vec![None];
             opts.extend(Platform::ALL.iter().copied().filter(|p| *p != Platform::Pc).map(Some));
@@ -1674,17 +1850,6 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 spawn_picker(menu, move || {
                     rfd::FileDialog::new().set_title("ROM folder to keep scanning").pick_folder().map(|p| Picked::RomFolder(p, plat))
                 })
-            }
-            Act::SetCover => {
-                if let Some(id) = game_id {
-                    spawn_picker(menu, move || {
-                        rfd::FileDialog::new()
-                            .set_title("Cover image")
-                            .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
-                            .pick_file()
-                            .map(|p| Picked::Cover(id, p))
-                    })
-                }
             }
             Act::BrowseLocation => {
                 if let Some(id) = game_id {
@@ -1765,11 +1930,24 @@ fn commit_edit(menu: &mut Menu, ctx: &mut Ctx) {
         }
         Kind::GameTitle => {
             let id = ctx.view.selected_game(&ctx.lib).map(|g| g.id.clone());
+            let mut changed = false;
             if let Some(g) = id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
-                if !text.trim().is_empty() {
-                    g.title = text.trim().to_string();
+                let t = text.trim();
+                if !t.is_empty() && t != g.title {
+                    g.title = t.to_string();
                     g.renamed = true;
+                    changed = true;
+                    // Looked up by name (Steam games go by their app id): ask again under the new one.
+                    if g.steam_appid.is_none() {
+                        g.description.clear();
+                        g.genres.clear();
+                        g.year.clear();
+                    }
                 }
+            }
+            // The art was found and the spine printed with the old name: redo all of it.
+            if let Some(id) = id.as_ref().filter(|_| changed) {
+                forget_game_art(ctx, id);
             }
             ctx.lib.revision += 1;
             ctx.persist.mark_lib();
@@ -1810,6 +1988,8 @@ fn close(menu: &mut Menu) {
     menu.open = false;
     menu.just_closed = true;
     menu.editing = None;
+    menu.slider_drag = None;
+    menu.ui_scale_hold = None;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1859,7 +2039,7 @@ fn menu_input(
 
     // As many rows as fit the window.
     if let Ok(w) = ctx.windows.get_single() {
-        let fit = (((w.height() - MENU_CHROME) / ROW_H).floor() as usize).clamp(6, MAX_ROWS);
+        let fit = (((w.height() / ctx.ui_scale.0 - MENU_CHROME) / ROW_H).floor() as usize).clamp(6, MAX_ROWS);
         if fit != menu.rows {
             menu.rows = fit;
             keep_visible(&mut menu);
@@ -1956,6 +2136,18 @@ fn menu_input(
         return;
     }
 
+    // A click (left or right) outside the panel, on the games, closes the settings; the
+    // dialogs above return earlier, so clicks in them do not.
+    if mouse.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
+        if let Some((p, w)) = ctx.windows.get_single().ok().and_then(|w| Some((w.cursor_position()?, w.width()))) {
+            if p.x < w - PANEL_W * ctx.ui_scale.0 {
+                close(&mut menu);
+                wheel.clear();
+                return;
+            }
+        }
+    }
+
     // The quit keys (Q, Esc) close the settings rather than quitting from them.
     if toggle || keys.just_pressed(KeyCode::Escape) || keys_pressed(&ctx.cfg.keys.quit, &keys) || pressed_pad(GamepadButtonType::East) {
         close(&mut menu);
@@ -1998,8 +2190,14 @@ fn menu_input(
                     close(&mut menu);
                     return;
                 }
-                BarBtn::ExpandAll => menu.collapsed.clear(),
-                BarBtn::CollapseAll => menu.collapsed = category_headers(),
+                BarBtn::ExpandAll => {
+                    menu.collapsed.clear();
+                    menu.open_subs = vec![SUB_COVERS];
+                }
+                BarBtn::CollapseAll => {
+                    menu.collapsed = category_headers();
+                    menu.open_subs.clear();
+                }
                 BarBtn::Reset => {
                     let now = time.elapsed_seconds();
                     if menu.reset_armed_until > now {
@@ -2021,6 +2219,7 @@ fn menu_input(
         .chain(bar.iter().map(|(_, i)| i))
         .chain(rows.iter().map(|(_, i)| i))
         .chain(arrows.iter().map(|(_, i)| i))
+        .chain(edit.sliders.iter().map(|(_, i, _)| i))
         .any(|i| *i != Interaction::None);
     for e in wheel.read() {
         if !over_panel {
@@ -2033,6 +2232,37 @@ fn menu_input(
         } else if y < 0.0 {
             menu.scroll = (menu.scroll + 2).min(max);
         }
+    }
+    // Sliders: pressing one sets the value there, and dragging moves it until let go.
+    if let Some(i) = menu.slider_drag {
+        let done = !mouse.pressed(MouseButton::Left);
+        let x = i
+            .checked_sub(menu.scroll)
+            .and_then(|r| edit.sliders.iter().find(|(t, ..)| t.0 == r))
+            .and_then(|(_, _, rel)| rel.normalized)
+            .map(|p| p.x)
+            .or_else(|| menu.entries.get(i).and_then(|e| num_frac(e, &mut ctx.cfg.data)));
+        if let Some(x) = x {
+            slide_to(&mut menu, &mut ctx, i, x, done);
+        }
+        if done {
+            menu.slider_drag = None;
+        }
+        return;
+    }
+    for (t, interaction, rel) in &edit.sliders {
+        let i = menu.scroll + t.0;
+        if *interaction == Interaction::None || i >= menu.entries.len() || t.0 >= menu.rows {
+            continue;
+        }
+        menu.index = i;
+        if mouse.just_pressed(MouseButton::Left) {
+            menu.slider_drag = Some(i);
+            if let Some(p) = rel.normalized {
+                slide_to(&mut menu, &mut ctx, i, p.x, false);
+            }
+        }
+        return;
     }
     // The < and > buttons step backwards / forwards (they sit on top of the row).
     let mut arrow_used = false;
@@ -2113,13 +2343,26 @@ fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
             held.clear();
         }
     };
+    // Inside a group (see `Kind::Sub`): whether it is open. Its advanced settings get an
+    // "Advanced" row of their own, after the group's everyday ones.
+    let mut sub: Option<bool> = None;
+    let mut category: &'static str = "";
     for e in all {
         if matches!(e.kind, Kind::Header) {
             flush(&mut list, &mut held, header, &menu.expanded);
             header = e.label;
+            category = e.label;
+            sub = None;
             list.push(e);
-        } else if menu.collapsed.contains(&header) {
+        } else if menu.collapsed.contains(&category) {
             // Folded category: only its header shows.
+        } else if let Kind::Sub(name) = e.kind {
+            flush(&mut list, &mut held, header, &menu.expanded);
+            header = name;
+            sub = Some(menu.open_subs.contains(&name));
+            list.push(e);
+        } else if sub == Some(false) {
+            // Folded group: only its row shows.
         } else if e.advanced {
             held.push(e);
         } else {
@@ -2173,16 +2416,6 @@ fn menu_pickers(mut menu: ResMut<Menu>, mut ctx: Ctx) {
             ctx.cfg.save();
             start_scan(&mut ctx.scanner, &ctx.cfg);
             ctx.toast.show("ROM folder added, scanning...");
-        }
-        Picked::Cover(id, path) => {
-            if let Some(g) = ctx.lib.find_mut(&id) {
-                g.cover_path = Some(path.to_string_lossy().into());
-            }
-            ctx.persist.mark_lib();
-            ctx.svc.missing.remove(&id);
-            ctx.view.covers.remove(&id);
-            ctx.view.respawn = true;
-            ctx.toast.show("Cover set");
         }
         Picked::Background(path) => {
             ctx.cfg.data.background.custom_path = path.to_string_lossy().into_owned();
@@ -2629,17 +2862,20 @@ struct ArtPick {
     pending: Vec<(usize, u32, u32, Vec<u8>)>,
     /// Picked this time, per surface (the candidate, or None for a file / automatic).
     in_use: std::collections::HashMap<ArtKind, Option<usize>>,
+    /// Just opened: the click that opened it is not a click outside the (not yet laid out) box.
+    fresh: bool,
 }
 
 /// How well a kind of image suits each surface (lower first; unsuited ones go last).
 fn art_rank(key: &str, tab: ArtKind) -> u8 {
-    // What a surface shows now leads its own tab and is left out of the others' order.
-    if let Some(k) = key.strip_prefix("made_") {
-        let mine = matches!((k, tab), ("media", ArtKind::Media) | ("insert", ArtKind::Insert) | ("back", ArtKind::Back) | ("spine", ArtKind::Spine));
-        return if mine { 0 } else { 250 };
+    // "Automatic" leads its own surface's tab and is left out of the others.
+    if let Some(k) = auto_kind(key) {
+        return if k == tab { 0 } else { 250 };
     }
     let order: &[&str] = match tab {
-        ArtKind::Cover => &["current", "front", "grid", "back", "header", "hero", "fanart", "shot", "disc", "cart", "logo"],
+        // The cover in use is the Automatic tile here, or the user's own pick.
+        ArtKind::Cover if key == "current" => return 250,
+        ArtKind::Cover => &["front", "grid", "back", "header", "hero", "fanart", "shot", "disc", "cart", "logo"],
         ArtKind::Media => &["disc", "cart", "hero", "fanart", "logo", "shot", "grid", "front", "current", "header", "back"],
         ArtKind::Insert => &["shot", "fanart", "hero", "back", "front", "grid", "current", "header", "disc", "cart", "logo"],
         ArtKind::Back => &["back", "shot", "fanart", "hero", "header", "grid", "front", "current", "logo", "disc", "cart"],
@@ -2648,10 +2884,25 @@ fn art_rank(key: &str, tab: ArtKind) -> u8 {
     order.iter().position(|k| *k == key).unwrap_or(order.len()) as u8
 }
 
+/// The surface an "Automatic" candidate is for.
+fn auto_kind(key: &str) -> Option<ArtKind> {
+    Some(match key.strip_prefix("auto_")? {
+        "cover" => ArtKind::Cover,
+        "media" => ArtKind::Media,
+        "insert" => ArtKind::Insert,
+        "back" => ArtKind::Back,
+        "spine" => ArtKind::Spine,
+        _ => return None,
+    })
+}
+
 impl ArtPick {
-    /// Candidates in this tab's order (only those whose thumbnail loaded, or still loading).
+    /// Candidates in this tab's order (only those whose thumbnail loaded, or still loading;
+    /// Automatic is always there, with or without a picture).
     fn order(&self) -> Vec<usize> {
-        let mut v: Vec<usize> = (0..self.cands.len()).filter(|&i| !self.cands[i].failed && art_rank(self.cands[i].cand.key, self.tab) < 250).collect();
+        let mut v: Vec<usize> = (0..self.cands.len())
+            .filter(|&i| (!self.cands[i].failed || auto_kind(self.cands[i].cand.key).is_some()) && art_rank(self.cands[i].cand.key, self.tab) < 250)
+            .collect();
         v.sort_by_key(|&i| (art_rank(self.cands[i].cand.key, self.tab), i));
         v
     }
@@ -2715,7 +2966,7 @@ fn open_art_pick(menu: &mut Menu, ctx: &mut Ctx) {
     });
     let (gid, gtitle) = (g.id.clone(), g.title.clone());
     art_preview(ctx, Some(ArtKind::Cover));
-    menu.art = Some(ArtPick { game_id: gid, title: gtitle, tab: ArtKind::Cover, cands: Vec::new(), listed: false, rx, scroll: 0, file_rx: None, pending: Vec::new(), in_use: Default::default() });
+    menu.art = Some(ArtPick { game_id: gid, title: gtitle, tab: ArtKind::Cover, cands: Vec::new(), listed: false, rx, scroll: 0, file_rx: None, pending: Vec::new(), in_use: Default::default(), fresh: true });
 }
 
 /// Uses `file` (None = automatic) for one of the game's surfaces: copied next to the cache so
@@ -2783,6 +3034,9 @@ struct ArtThumbImg(usize);
 struct ArtThumbLabel(usize);
 #[derive(Component)]
 struct ArtGrid;
+/// The art chooser's box (a click outside it closes the chooser).
+#[derive(Component)]
+struct ArtBox;
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum ArtBtn {
     Auto,
@@ -2834,13 +3088,14 @@ fn spawn_art_picker(mut commands: Commands, fonts: Res<MenuFonts>) {
                     ..default()
                 },
                 Interaction::default(),
+                ArtBox,
             ))
             .with_children(|d| {
-                d.spawn((txt(&f.bold, 17.0, Color::WHITE, ""), ArtTitle));
+                d.spawn((txt(&f.bold, 21.0, Color::WHITE, ""), ArtTitle));
                 d.spawn(NodeBundle { style: Style { column_gap: Val::Px(4.0), ..default() }, ..default() }).with_children(|row| {
                     for (kind, label) in [(ArtKind::Cover, "Cover"), (ArtKind::Back, "Back"), (ArtKind::Spine, "Spine"), (ArtKind::Media, "Disc/Cart"), (ArtKind::Insert, "Insert")] {
                         row.spawn((button(if kind == ArtKind::Media { 92.0 } else { 78.0 }), ArtTab(kind))).with_children(|t| {
-                            t.spawn(txt(&f.bold, 14.0, TEXT, label));
+                            t.spawn(txt(&f.bold, 16.0, TEXT, label));
                         });
                     }
                 });
@@ -2883,7 +3138,7 @@ fn spawn_art_picker(mut commands: Commands, fonts: Res<MenuFonts>) {
                                             ArtThumbImg(i),
                                         ));
                                     });
-                                    let mut t = txt(&f.regular, 11.0, DIM, "");
+                                    let mut t = txt(&f.regular, 13.5, DIM, "");
                                     t.style.max_width = Val::Px(ART_THUMB);
                                     t.style.margin = UiRect::top(Val::Px(3.0));
                                     t.focus_policy = bevy::ui::FocusPolicy::Pass;
@@ -2892,17 +3147,17 @@ fn spawn_art_picker(mut commands: Commands, fonts: Res<MenuFonts>) {
                             }
                         });
                     });
-                d.spawn((txt(&f.regular, 12.5, DIM, ""), ArtStatus));
+                d.spawn((txt(&f.regular, 15.0, DIM, ""), ArtStatus));
                 d.spawn(NodeBundle { style: Style { align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }, ..default() }).with_children(|row| {
                     row.spawn((button(100.0), ArtBtn::Auto)).with_children(|t| {
-                        t.spawn(txt(&f.bold, 13.5, TEXT, "Automatic"));
+                        t.spawn(txt(&f.bold, 15.5, TEXT, "Automatic"));
                     });
                     row.spawn((button(130.0), ArtBtn::File)).with_children(|t| {
-                        t.spawn(txt(&f.bold, 13.5, TEXT, "Choose a file..."));
+                        t.spawn(txt(&f.bold, 15.5, TEXT, "Choose a file..."));
                     });
                     row.spawn(NodeBundle { style: Style { flex_grow: 1.0, ..default() }, ..default() });
                     row.spawn((button(80.0), ArtBtn::Close)).with_children(|t| {
-                        t.spawn(txt(&f.bold, 13.5, TEXT, "Close"));
+                        t.spawn(txt(&f.bold, 15.5, TEXT, "Close"));
                     });
                 });
             });
@@ -2920,16 +3175,33 @@ fn art_pick_input(
     tabs: Query<(&ArtTab, &Interaction)>,
     thumbs: Query<(&ArtThumb, &Interaction)>,
     buttons: Query<(&ArtBtn, &Interaction)>,
+    art_box: Query<(&Node, &GlobalTransform), With<ArtBox>>,
 ) {
     let Some(pick) = menu.art.as_mut() else {
         wheel.clear();
         return;
     };
+    let fresh = std::mem::take(&mut pick.fresh);
     while let Ok(m) = pick.rx.try_recv() {
         match m {
             ArtMsg::List(list) => {
                 pick.cands = list.into_iter().map(|cand| ArtCand { cand, file: None, thumb: None, failed: false }).collect();
                 pick.listed = true;
+                // Outline Automatic on the surfaces that use it now.
+                let game = ctx.lib.games.iter().find(|g| g.id == pick.game_id);
+                for (i, c) in pick.cands.iter().enumerate() {
+                    let Some(kind) = auto_kind(c.cand.key) else { continue };
+                    let picked = game.is_some_and(|g| match kind {
+                        ArtKind::Cover => g.cover_path.is_some(),
+                        ArtKind::Media => g.media_art.is_some(),
+                        ArtKind::Insert => g.insert_art.is_some(),
+                        ArtKind::Back => g.back_art.is_some(),
+                        ArtKind::Spine => g.spine_art.is_some(),
+                    });
+                    if !picked {
+                        pick.in_use.entry(kind).or_insert(Some(i));
+                    }
+                }
             }
             ArtMsg::Thumb(i, f, w, h, px) => {
                 if let Some(c) = pick.cands.get_mut(i) {
@@ -2973,6 +3245,24 @@ fn art_pick_input(
         art_preview(&mut ctx, None);
         return;
     }
+    if !mouse.any_just_pressed([MouseButton::Left, MouseButton::Right]) || fresh {
+        return;
+    }
+    // A click (left or right) anywhere outside the box closes the chooser (the settings stay open).
+    // Node sizes and places are in UI units: the window's pixels divided by the UI scale.
+    let cursor = ctx.windows.get_single().ok().and_then(|w| w.cursor_position()).map(|p| p / ctx.ui_scale.0);
+    let outside = cursor.is_some_and(|p| {
+        art_box.iter().all(|(node, at)| {
+            let d = (p - at.translation().truncate()).abs();
+            let half = node.size() * 0.5;
+            d.x > half.x || d.y > half.y
+        })
+    });
+    if outside && pick.file_rx.is_none() {
+        menu.art = None;
+        art_preview(&mut ctx, None);
+        return;
+    }
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
@@ -2986,8 +3276,13 @@ fn art_pick_input(
     if let Some((t, _)) = thumbs.iter().find(|(_, i)| **i == Interaction::Pressed) {
         let order = pick.order();
         let Some(&ci) = order.get(t.0) else { return };
-        let Some(file) = pick.cands[ci].file.clone() else { return };
         let (id, kind) = (pick.game_id.clone(), pick.tab);
+        if auto_kind(pick.cands[ci].cand.key).is_some() {
+            set_game_art(&mut ctx, &id, kind, None);
+            pick.in_use.insert(kind, Some(ci));
+            return;
+        }
+        let Some(file) = pick.cands[ci].file.clone() else { return };
         set_game_art(&mut ctx, &id, kind, Some(file));
         // Stays open (for the other surfaces); the pick is outlined.
         pick.in_use.insert(kind, Some(ci));
@@ -3001,7 +3296,8 @@ fn art_pick_input(
         Some(ArtBtn::Auto) => {
             let (id, kind) = (pick.game_id.clone(), pick.tab);
             set_game_art(&mut ctx, &id, kind, None);
-            pick.in_use.insert(kind, None);
+            let auto = pick.order().into_iter().find(|&i| auto_kind(pick.cands[i].cand.key).is_some());
+            pick.in_use.insert(kind, auto);
         }
         Some(ArtBtn::File) => {
             if pick.file_rx.is_none() {
@@ -3131,5 +3427,43 @@ fn draw_art_picker(
             Interaction::Hovered => Color::srgba(1.0, 1.0, 1.0, 0.16),
             Interaction::Pressed => Color::srgba(0.35, 0.62, 1.0, 0.4),
         };
+    }
+}
+
+#[cfg(test)]
+mod art_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_leads_only_its_own_tab() {
+        for tab in [ArtKind::Cover, ArtKind::Media, ArtKind::Insert, ArtKind::Back, ArtKind::Spine] {
+            let own = format!("auto_{tab:?}").to_lowercase();
+            let own: &'static str = Box::leak(own.into_boxed_str());
+            assert_eq!(art_rank(own, tab), 0);
+            for other in ["auto_cover", "auto_media", "auto_insert", "auto_back", "auto_spine"].into_iter().filter(|k| *k != own) {
+                assert_eq!(art_rank(other, tab), 250, "{other} on {tab:?}");
+            }
+        }
+        // The cover in use is offered for the other surfaces, not again on the cover tab.
+        assert_eq!(art_rank("current", ArtKind::Cover), 250);
+        assert!(art_rank("current", ArtKind::Back) < 250);
+    }
+
+    #[test]
+    fn candidates_have_an_automatic_per_surface() {
+        let src = crate::covers::ArtSource {
+            id: "test:none".into(),
+            title: "No Such Game".into(),
+            steam_appid: None,
+            cover_path: None,
+            libretro_system: None,
+            path: None,
+            sgdb_key: String::new(),
+            chosen: vec![],
+        };
+        let c = crate::covers::art_candidates(&src);
+        let autos: Vec<&str> = c.iter().map(|c| c.key).filter(|k| k.starts_with("auto_")).collect();
+        assert_eq!(autos, ["auto_cover", "auto_media", "auto_insert", "auto_back", "auto_spine"]);
+        assert!(c.iter().all(|c| !c.key.starts_with("made_")));
     }
 }

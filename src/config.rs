@@ -244,6 +244,8 @@ pub struct General {
     pub bloom: bool,
     /// Multiplies all scene lighting.
     pub brightness: f32,
+    /// Size of the menus and text on top of fitting them to the window (1 = as designed).
+    pub ui_scale: f32,
     pub shadows: bool,
     /// Rescan installed stores when the launcher starts.
     pub scan_on_start: bool,
@@ -276,6 +278,7 @@ impl Default for General {
             show_info: true,
             bloom: true,
             brightness: 1.0,
+            ui_scale: 1.0,
             shadows: false,
             scan_on_start: true,
             window_radius: 14,
@@ -339,6 +342,11 @@ pub struct Display {
     pub highlight_width: f32,
     /// The game under the mouse leans away from the cursor.
     pub hover_tilt: bool,
+    /// How far the selected game is from the camera (cm), the same in every layout (scaled
+    /// with the zoom).
+    pub selected_distance: f32,
+    /// How far games lean away from the mouse (1 = as designed).
+    pub hover_tilt_strength: f32,
 }
 
 impl Default for Display {
@@ -369,6 +377,8 @@ impl Default for Display {
             highlight_color: "#2f8cff".into(),
             highlight_width: 0.16,
             hover_tilt: true,
+            selected_distance: 34.0,
+            hover_tilt_strength: 1.0,
         }
     }
 }
@@ -400,6 +410,8 @@ pub struct Background {
     pub overlay_halfway: bool,
     /// Halfway overlay: how far out the background reaches (fraction of the screen, 0.2..1.5).
     pub overlay_halfway_size: f32,
+    /// How solid the halfway background is in the middle (0..1).
+    pub overlay_halfway_opacity: f32,
 }
 
 impl Default for Background {
@@ -419,6 +431,7 @@ impl Default for Background {
             custom_path: String::new(),
             overlay_halfway: false,
             overlay_halfway_size: 0.75,
+            overlay_halfway_opacity: 1.0,
         }
     }
 }
@@ -470,11 +483,15 @@ pub struct Animation {
     pub idle_sway: f32,
     /// Selected item slowly spins (degrees per second, 0 disables).
     pub spin: f32,
+    /// The path games take to their new places when the selection changes: "direct", "flip"
+    /// (turn round), "tumble" (end over end), "roll" (bank), "dip" (back, then forward),
+    /// "swoop" (out towards you, then back).
+    pub motion: String,
 }
 
 impl Default for Animation {
     fn default() -> Self {
-        Self { speed: 1.25, scroll_speed: 1.2, idle_sway: 1.0, spin: 0.0 }
+        Self { speed: 1.25, scroll_speed: 1.2, idle_sway: 1.0, spin: 0.0, motion: "direct".into() }
     }
 }
 
@@ -607,7 +624,7 @@ pub fn default_layout_params(kind: LayoutKind) -> LayoutParams {
             p.visible = 60.0;
         }
         LayoutKind::Grid => {
-            p.spacing = 17.0;
+            p.spacing = 14.0;
             p.columns = 7;
             p.rows = 3;
             p.cam_distance = 62.0;

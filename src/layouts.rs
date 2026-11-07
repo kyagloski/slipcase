@@ -356,7 +356,8 @@ pub fn pose(c: &LayoutCtx) -> Pose {
             let on_wall = Vec3::new(d.x, d.y, 0.0);
             out.pos = on_wall.lerp(Vec3::new(0.0, p.look_height * s, 12.0 * s), a);
             out.rot = (Quat::from_rotation_y(-d.x / cell * 0.05) * Quat::from_rotation_x(d.y / cell * 0.04)).slerp(Quat::IDENTITY, a);
-            let fit = (cell * 0.92 / c.dims.x.max(c.dims.y)).min(1.0);
+            // As big as fits its spot, across and down (rows are taller than columns are wide).
+            let fit = (cell * 0.95 / c.dims.x).min(cell * GRID_ROW * 0.95 / c.dims.y).min(1.0);
             out.scale = s * fit * (1.0 + 0.3 * a);
             let z = c.zoom.max(0.2);
             let fx = edge_fade(d.x.abs() / cell, (cols as f32 * 0.5 + 1.2) * z, 1.5);

@@ -880,22 +880,16 @@ pub fn case_border(kind: CaseKind) -> f32 {
     }
 }
 
-/// Margin round the printed art on a case with corner radius `rc`: a sleeve is a plain
-/// rectangle under the plastic, so it sits in far enough for its corners to clear the rounded
-/// ones instead of being cut off by them. Cardboard boxes are printed to the edge.
-fn print_border(kind: CaseKind, rc: f32) -> f32 {
-    match kind {
-        CaseKind::Box => case_border(kind),
-        _ => case_border(kind).max(rc * (1.0 - std::f32::consts::FRAC_1_SQRT_2) + 0.03),
-    }
+/// Margin round the printed art on a case with corner radius `rc` (the same all round: the
+/// art's corners are rounded to follow the case's, see `print_corner`).
+fn print_border(kind: CaseKind, _rc: f32) -> f32 {
+    case_border(kind)
 }
 
-/// Corner radius of the printed art on the opening side (square except on cardboard boxes).
-fn print_corner(kind: CaseKind, rc: f32, border: f32) -> f32 {
-    match kind {
-        CaseKind::Box => (rc - border).max(0.0),
-        _ => 0.0,
-    }
+/// Corner radius of the printed art on the opening side: the case's corner less the margin, so
+/// the art's corners run parallel to the case's.
+fn print_corner(_kind: CaseKind, rc: f32, border: f32) -> f32 {
+    (rc - border).max(0.0)
 }
 
 fn case_wall(kind: CaseKind) -> f32 {
@@ -1153,12 +1147,31 @@ fn spine_band(c: &CaseDims, top: f32, h: f32) -> Mesh {
     m.build()
 }
 
-/// A console banner as an image `w` x `h` pixels: the band colour, the lettering centred and
-/// as large as fits, and the accent line along the bottom.
+/// A console banner as an image `w` x `h` pixels: the shaded band, the emblem and lettering
+/// (on the left like the real ones, centred on a narrow spine) and the accent line.
 fn banner_image(b: &crate::platform::Banner, font: Option<&fontdue::Font>, w: u32, h: u32) -> Image {
+    make_image(w, h, banner_rgba(b, font, w, h).into_raw(), true)
+}
+
+/// A side banner `w` x `h` pixels (taller than wide): drawn lying down, then stood up so it
+/// reads bottom to top.
+fn side_banner_image(b: &crate::platform::Banner, font: Option<&fontdue::Font>, w: u32, h: u32) -> Image {
+    let img = image::imageops::rotate270(&banner_rgba(b, font, h, w));
+    make_image(w, h, img.into_raw(), true)
+}
+
+fn banner_rgba(b: &crate::platform::Banner, font: Option<&fontdue::Font>, w: u32, h: u32) -> RgbaImage {
+    use crate::platform::Mark;
     let rgb = |c: u32| [(c >> 16) as u8, (c >> 8) as u8, c as u8];
-    let (bg, fg) = (rgb(b.bg), rgb(b.fg));
-    let mut img = RgbaImage::from_pixel(w, h, image::Rgba([bg[0], bg[1], bg[2], 255]));
+    let mix = |a: [u8; 3], b: [u8; 3], t: f32| [0, 1, 2].map(|k| (a[k] as f32 + (b[k] as f32 - a[k] as f32) * t) as u8);
+    let (top, bottom) = (rgb(b.bg), rgb(b.bg2.unwrap_or(b.bg)));
+    let mut img = RgbaImage::new(w, h);
+    for y in 0..h {
+        let c = mix(top, bottom, y as f32 / (h - 1).max(1) as f32);
+        for x in 0..w {
+            img.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
+        }
+    }
     let line_h = if b.line.is_some() { (h as f32 * 0.08).max(2.0) as u32 } else { 0 };
     if let Some(l) = b.line.map(rgb) {
         for y in h - line_h..h {
@@ -1167,25 +1180,135 @@ fn banner_image(b: &crate::platform::Banner, font: Option<&fontdue::Font>, w: u3
             }
         }
     }
-    if let Some(f) = font {
-        let avail = (h - line_h) as f32;
-        let mut px = avail * 0.58;
-        let max_w = w as f32 * 0.86;
-        let tw = text_width(f, b.text, px);
-        if tw > max_w {
-            px *= max_w / tw;
-        }
-        let x = (w as f32 - text_width(f, b.text, px)) * 0.5;
-        draw_text(&mut img, f, b.text, px, x, avail * 0.5 + px * 0.36, fg);
+    let avail = (h - line_h) as f32;
+    let spine = (w as f32) < avail * 3.0;
+    let margin = if spine { w as f32 * 0.07 } else { avail * 0.45 };
+    let mark = if spine { Mark::None } else { b.mark };
+    let ms = avail * 0.62;
+    let gap = if mark == Mark::None { 0.0 } else { ms + avail * 0.25 };
+    let Some(f) = font else { return img };
+    let width = |px: f32| b.text.iter().map(|(t, _)| text_width(f, t, px)).sum::<f32>();
+    let mut px = avail * 0.56;
+    let max_w = w as f32 - margin * 2.0 - gap;
+    if width(px) > max_w {
+        px *= max_w / width(px);
     }
-    make_image(w, h, img.into_raw(), true)
+    let x0 = if spine { (w as f32 - width(px)) * 0.5 } else { margin };
+    if mark != Mark::None {
+        draw_mark(&mut img, mark, x0, (avail - ms) * 0.5, ms, mix(top, bottom, 0.5));
+    }
+    let mut x = x0 + gap;
+    for (t, c) in b.text {
+        draw_text(&mut img, f, t, px, x, avail * 0.5 + px * 0.36, rgb(*c));
+        x += text_width(f, t, px);
+    }
+    img
+}
+
+/// Draws a banner emblem in the square at (x, y) of side `s`, smoothed by sampling each pixel
+/// 4 x 4 times. `bg` is the band colour behind it (for the cut-outs).
+fn draw_mark(img: &mut RgbaImage, mark: crate::platform::Mark, x: f32, y: f32, s: f32, bg: [u8; 3]) {
+    use crate::platform::Mark;
+    let rgb = |c: u32| [(c >> 16) as u8, (c >> 8) as u8, c as u8];
+    // Colour at a point of the unit square (centre 0, 0; -0.5..0.5), if the emblem covers it.
+    let shape = |u: f32, v: f32| -> Option<[u8; 3]> {
+        match mark {
+            Mark::None => None,
+            Mark::Orb(fill, cross) => {
+                let r = (u * u + v * v).sqrt();
+                if r > 0.5 {
+                    return None;
+                }
+                // The X: two strokes, thick in the middle and thinning to points at the rim.
+                let d = (u - v).abs().min((u + v).abs()) / std::f32::consts::SQRT_2;
+                let thick = 0.09 * (1.0 - r * 1.6).max(0.25);
+                Some(if d < thick && r < 0.47 { rgb(cross) } else { rgb(fill) })
+            }
+            Mark::Switch(c) => {
+                // Two rounded halves of a 1 x 0.86 badge; the left solid, the right outlined.
+                let inside = |cx: f32, hw: f32, hh: f32, r: f32| {
+                    let (dx, dy) = (((u - cx).abs() - hw + r).max(0.0), (v.abs() - hh + r).max(0.0));
+                    (dx * dx + dy * dy).sqrt() <= r
+                };
+                let (hw, hh, r) = (0.23, 0.46, 0.2);
+                if inside(-0.25, hw, hh, r) {
+                    let dot = ((u + 0.25).powi(2) + (v + 0.2).powi(2)).sqrt() < 0.09;
+                    return Some(if dot { bg } else { rgb(c) });
+                }
+                if inside(0.25, hw, hh, r) && !inside(0.25, hw - 0.07, hh - 0.07, r - 0.07) {
+                    return Some(rgb(c));
+                }
+                let dot = ((u - 0.25).powi(2) + (v - 0.12).powi(2)).sqrt() < 0.09;
+                dot.then(|| rgb(c))
+            }
+            Mark::Swirl(c) => {
+                // Spiral of a little over two turns, outward from the middle.
+                let (r, a) = ((u * u + v * v).sqrt(), (-v).atan2(u));
+                if r > 0.5 {
+                    return None;
+                }
+                let turn = 0.21;
+                let t = (r / turn - a / std::f32::consts::TAU).rem_euclid(1.0);
+                (t < 0.42 && r > 0.04).then(|| rgb(c))
+            }
+            Mark::Cube(c) => {
+                // A hexagon outline with the three edges meeting in the middle.
+                let hex = |k: f32| {
+                    let (au, av) = (u.abs() / k, v.abs() / k);
+                    au <= 0.433 && av <= 0.5 - au * 0.577
+                };
+                if !hex(1.0) {
+                    return None;
+                }
+                let w = 0.06;
+                let edge = !hex(0.78);
+                // Spokes from the centre to three corners (top, lower left, lower right).
+                let spoke = [0.0f32, 2.094, 4.189].iter().any(|s| {
+                    let (dx, dy) = ((s - std::f32::consts::FRAC_PI_2).cos(), (s - std::f32::consts::FRAC_PI_2).sin());
+                    let along = u * dx + v * dy;
+                    along >= 0.0 && (u * dy - v * dx).abs() < w * 0.5
+                });
+                (edge || spoke).then(|| rgb(c))
+            }
+        }
+    };
+    let n = 4;
+    for py in y.floor().max(0.0) as u32..((y + s).ceil() as u32).min(img.height()) {
+        for px in x.floor().max(0.0) as u32..((x + s).ceil() as u32).min(img.width()) {
+            let mut acc = [0.0f32; 3];
+            let mut hits = 0;
+            for sy in 0..n {
+                for sx in 0..n {
+                    let u = (px as f32 + (sx as f32 + 0.5) / n as f32 - x) / s - 0.5;
+                    let v = (py as f32 + (sy as f32 + 0.5) / n as f32 - y) / s - 0.5;
+                    if let Some(c) = shape(u, v) {
+                        (0..3).for_each(|k| acc[k] += c[k] as f32);
+                        hits += 1;
+                    }
+                }
+            }
+            if hits == 0 {
+                continue;
+            }
+            let cov = hits as f32 / (n * n) as f32;
+            let p = img.get_pixel_mut(px, py);
+            for k in 0..3 {
+                p.0[k] = (p.0[k] as f32 * (1.0 - cov) + acc[k] / hits as f32 * cov) as u8;
+            }
+        }
+    }
 }
 
 /// Cover art outline (centred on its own middle): square on the spine side, following the
 /// case's corner radius on the opening side. Returns (outline, width, height, centre x).
 /// `top_cut` leaves that much room at the top (for the console banner), with a square corner.
 fn cover_outline(c: &CaseDims, top_cut: f32) -> (Vec<Vec2>, f32, f32, f32) {
-    let (x0, x1) = (c.xs, c.hw - c.border);
+    cover_outline_cut(c, top_cut, 0.0)
+}
+
+/// `cover_outline`, also leaving `left_cut` free down the spine side (for a side banner).
+fn cover_outline_cut(c: &CaseDims, top_cut: f32, left_cut: f32) -> (Vec<Vec2>, f32, f32, f32) {
+    let (x0, x1) = (c.xs + left_cut, c.hw - c.border);
     let (w, h) = (x1 - x0, (c.hh - c.border) * 2.0 - top_cut);
     let r = c.print_r;
     let rt = if top_cut > 0.0 { 0.0 } else { r };
@@ -1202,9 +1325,15 @@ fn banner_frac(kind: CaseKind) -> f32 {
     }
 }
 
-/// Height of the banner across a platform's cover (0 when it has none or banners are off).
+/// Height of the banner across the top of a platform's cover (0 when it has none, it runs
+/// down the side, or banners are off).
 fn banner_height(cfg: &Config, p: Platform, kind: CaseKind, cover_h: f32) -> f32 {
-    if cfg.display.platform_banners && p.banner().is_some() { cover_h * banner_frac(kind) } else { 0.0 }
+    if cfg.display.platform_banners && p.banner().is_some_and(|b| !b.side) { cover_h * banner_frac(kind) } else { 0.0 }
+}
+
+/// Width of a banner down the side of a platform's cover (0 when there is none).
+fn banner_width(cfg: &Config, p: Platform, kind: CaseKind, cover_w: f32) -> f32 {
+    if cfg.display.platform_banners && p.banner().is_some_and(|b| b.side) { cover_w * banner_frac(kind) * 1.15 } else { 0.0 }
 }
 
 /// Rosette hub a disc clips onto, standing on the floor of the case (z = 0 at the floor).
@@ -1606,7 +1735,9 @@ pub fn front_aspect(cfg: &Config, p: Platform) -> f32 {
     let (_, ch, _) = geometry(cfg, p).case;
     let kind = case_look(cfg, p).kind;
     let h = ch - print_border_of(cfg, p) * 2.0;
-    panel_aspect(cfg, p) * h / (h - banner_height(cfg, p, kind, h))
+    let a = panel_aspect(cfg, p);
+    let w = a * h;
+    (w - banner_width(cfg, p, kind, w)) / (h - banner_height(cfg, p, kind, h))
 }
 
 /// Unlit, back faces only (see the outline shell in `spawn_item`).
@@ -1903,8 +2034,9 @@ fn add_case(
     let (art, fw, fh, acx) = cover_outline(c, 0.0);
     // The front art stops under the console banner instead of going behind it.
     let bh = banner_height(cx.cfg, game.platform, look.kind, fh);
-    let (front_art, _, front_h, _) = cover_outline(c, bh);
-    let front_mesh = cx.gfx.mesh(format!("front{key}/{bh:.3}"), cx.meshes, || flat_poly(&front_art, 0.0, true, fw, front_h));
+    let bw = banner_width(cx.cfg, game.platform, look.kind, fw);
+    let (front_art, front_w, front_h, front_cx) = cover_outline_cut(c, bh, bw);
+    let front_mesh = cx.gfx.mesh(format!("front{key}/{bh:.3}/{bw:.3}"), cx.meshes, || flat_poly(&front_art, 0.0, true, front_w, front_h));
     let back_mesh = cx.gfx.mesh(format!("back{key}"), cx.meshes, || flat_poly(&art, 0.0, false, fw, fh));
     let front = cover_material(cx.materials, ac);
     let back = cx.materials.add(StandardMaterial {
@@ -1914,15 +2046,17 @@ fn add_case(
         depth_bias: PRINT_BIAS,
         ..default()
     });
-    parts.push(Part { mesh: front_mesh, material: Mat::Std(front.clone()), transform: Transform::from_xyz(acx, -bh * 0.5, c.hd + EPS), slot: Slot::Lid });
+    parts.push(Part { mesh: front_mesh, material: Mat::Std(front.clone()), transform: Transform::from_xyz(front_cx, -bh * 0.5, c.hd + EPS), slot: Slot::Lid });
     parts.push(Part { mesh: back_mesh, material: Mat::Std(back.clone()), transform: Transform::from_xyz(acx, 0.0, -c.hd - EPS), slot: Slot::Root });
     let (sw, sh) = {
         let prof = spine_profile(c, EPS);
         (prof.last().map(|p| p.2).unwrap_or(1.0), (c.hh - c.border) * 2.0)
     };
     let spine_mesh = cx.gfx.mesh(format!("spineart{key}"), cx.meshes, || spine_art(c));
-    let banner_on = cx.cfg.display.platform_banners && game.platform.banner().is_some();
-    let spine_img = make_spine(&game.title, game.platform.display_name(), ac, cx.font, sh, sw, banner_on);
+    // PC games keep the plain "PC" tag on the spine, as do side banners; their banner is only
+    // on the front.
+    let spine_banner = cx.cfg.display.platform_banners && game.platform.banner().is_some_and(|b| !b.side) && game.platform != Platform::Pc;
+    let spine_img = make_spine(&game.title, game.platform.display_name(), ac, cx.font, sh, sw, spine_banner);
     let spine_mat = cx.materials.add(StandardMaterial {
         base_color_texture: Some(cx.images.add(spine_img)),
         perceptual_roughness: 0.6,
@@ -1932,50 +2066,60 @@ fn add_case(
     });
     parts.push(Part { mesh: spine_mesh, material: Mat::Std(spine_mat.clone()), transform: Transform::IDENTITY, slot: Slot::Spine });
 
-    // The console's banner across the top of the cover and of the spine, over the art (and
-    // later on the manual: material and height).
-    let mut manual_banner: Option<(Handle<StandardMaterial>, f32)> = None;
+    // The console's banner across the top of the cover and of the spine, or down the cover's
+    // spine side, over the art.
     if let Some(banner) = cx.cfg.display.platform_banners.then(|| game.platform.banner()).flatten() {
         let top = c.hh - c.border;
-        // Front: follows the art's rounded top corner on the opening side.
-        let r = c.print_r;
-        let poly = rounded_poly(&[(-fw * 0.5, -bh * 0.5, 0.0), (fw * 0.5, -bh * 0.5, 0.0), (fw * 0.5, bh * 0.5, r), (-fw * 0.5, bh * 0.5, 0.0)]);
-        let front_band = cx.gfx.mesh(format!("band_f{key}/{bh:.3}"), cx.meshes, || flat_poly(&poly, 0.0, true, fw, bh));
-        let spine_band_mesh = cx.gfx.mesh(format!("band_s{key}/{bh:.3}"), cx.meshes, || spine_band(c, top, bh));
-        let bkey = format!("{:?}{key}", game.platform);
-        let (front_mat, spine_band_mat) = match cx.gfx.banners.get(&bkey) {
-            Some(m) => m.clone(),
-            None => {
-                // About 64 pixels per cm.
-                let ppc = 64.0;
-                let front_img = banner_image(&banner, cx.font, (fw * ppc) as u32, (bh * ppc).max(16.0) as u32);
-                let spine_img = banner_image(&banner, cx.font, (sw * ppc).max(32.0) as u32, (bh * ppc).max(16.0) as u32);
-                let mut mat = |img: Image| {
-                    let tex = cx.images.add(img);
-                    cx.materials.add(StandardMaterial {
-                        base_color_texture: Some(tex),
-                        perceptual_roughness: 0.6,
-                        reflectance: 0.25,
-                        // Above the cover art it overlaps.
-                        depth_bias: PRINT_BIAS + 1.0,
-                        ..default()
-                    })
-                };
-                let m = (mat(front_img), mat(spine_img));
-                cx.gfx.banners.insert(bkey, m.clone());
-                m
-            }
+        // About 64 pixels per cm.
+        let ppc = 64.0;
+        let mut mat = |img: Image| {
+            let tex = cx.images.add(img);
+            cx.materials.add(StandardMaterial {
+                base_color_texture: Some(tex),
+                perceptual_roughness: 0.6,
+                reflectance: 0.25,
+                // Above the cover art it overlaps.
+                depth_bias: PRINT_BIAS + 1.0,
+                ..default()
+            })
         };
-        parts.push(Part {
-            mesh: front_band,
-            material: Mat::Std(front_mat.clone()),
-            transform: Transform::from_xyz(acx, top - bh * 0.5, c.hd + EPS * 2.0),
-            slot: Slot::Lid,
-        });
-        parts.push(Part { mesh: spine_band_mesh, material: Mat::Std(spine_band_mat), transform: Transform::IDENTITY, slot: Slot::Spine });
-        manual_banner = Some((front_mat.clone(), bh));
+        let bkey = format!("{:?}{key}", game.platform);
+        if banner.side {
+            // Full height down the spine side, where the print's corners are square.
+            let poly = rounded_poly(&[(-bw * 0.5, -fh * 0.5, 0.0), (bw * 0.5, -fh * 0.5, 0.0), (bw * 0.5, fh * 0.5, 0.0), (-bw * 0.5, fh * 0.5, 0.0)]);
+            let band = cx.gfx.mesh(format!("band_l{key}/{bw:.3}"), cx.meshes, || flat_poly(&poly, 0.0, true, bw, fh));
+            let m = match cx.gfx.banners.get(&bkey) {
+                Some((m, _)) => m.clone(),
+                None => {
+                    let m = mat(side_banner_image(&banner, cx.font, (bw * ppc).max(16.0) as u32, (fh * ppc) as u32));
+                    cx.gfx.banners.insert(bkey, (m.clone(), m.clone()));
+                    m
+                }
+            };
+            parts.push(Part { mesh: band, material: Mat::Std(m), transform: Transform::from_xyz(c.xs + bw * 0.5, 0.0, c.hd + EPS * 2.0), slot: Slot::Lid });
+        } else {
+            // Front: follows the art's rounded top corner on the opening side.
+            let r = c.print_r;
+            let poly = rounded_poly(&[(-fw * 0.5, -bh * 0.5, 0.0), (fw * 0.5, -bh * 0.5, 0.0), (fw * 0.5, bh * 0.5, r), (-fw * 0.5, bh * 0.5, 0.0)]);
+            let front_band = cx.gfx.mesh(format!("band_f{key}/{bh:.3}"), cx.meshes, || flat_poly(&poly, 0.0, true, fw, bh));
+            let spine_band_mesh = cx.gfx.mesh(format!("band_s{key}/{bh:.3}"), cx.meshes, || spine_band(c, top, bh));
+            let (front_mat, spine_band_mat) = match cx.gfx.banners.get(&bkey) {
+                Some(m) => m.clone(),
+                None => {
+                    let front_img = banner_image(&banner, cx.font, (fw * ppc) as u32, (bh * ppc).max(16.0) as u32);
+                    let spine_img = banner_image(&banner, cx.font, (sw * ppc).max(32.0) as u32, (bh * ppc).max(16.0) as u32);
+                    let m = (mat(front_img), mat(spine_img));
+                    cx.gfx.banners.insert(bkey, m.clone());
+                    m
+                }
+            };
+            parts.push(Part { mesh: front_band, material: Mat::Std(front_mat), transform: Transform::from_xyz(acx, top - bh * 0.5, c.hd + EPS * 2.0), slot: Slot::Lid });
+            if spine_banner {
+                parts.push(Part { mesh: spine_band_mesh, material: Mat::Std(spine_band_mat), transform: Transform::IDENTITY, slot: Slot::Spine });
+            }
+        }
     }
-    slots.push(CoverSlot { mat: front, aspect: fw / front_h, kind: ArtKind::Cover });
+    slots.push(CoverSlot { mat: front, aspect: front_w / front_h, kind: ArtKind::Cover });
     *back_slot = Some(CoverSlot { mat: back, aspect: fw / fh, kind: ArtKind::Back });
     *spine_slot = Some(CoverSlot { mat: spine_mat, aspect: sw / sh, kind: ArtKind::Spine });
 
@@ -2062,16 +2206,6 @@ fn add_case(
             slot: Slot::Booklet,
         });
         slots.push(CoverSlot { mat: manual, aspect: (bw - 0.04) / (bh - 0.04), kind: ArtKind::Insert });
-        if let Some((band, band_h)) = manual_banner {
-            let (w, h) = (bw - 0.04, band_h.min(bh * 0.2));
-            let m = cx.gfx.mesh(format!("q{w:.3}x{h:.3}"), cx.meshes, || Rectangle::new(w, h).into());
-            parts.push(Part {
-                mesh: m,
-                material: Mat::Std(band),
-                transform: Transform::from_xyz(bx, (bh - 0.04 - h) * 0.5, lid_floor - bt - EPS * 1.5).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
-                slot: Slot::Booklet,
-            });
-        }
         // Clips along the outer edge: a post beside the manual's edge with a lip over it
         // (plastic cases only).
         let edge = bx + bw * 0.5;
@@ -2294,3 +2428,4 @@ pub fn spawn_item(commands: &mut Commands, cx: &mut SpawnCtx, game: &Game, view_
     ));
     root
 }
+

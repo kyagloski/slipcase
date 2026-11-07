@@ -58,7 +58,9 @@ impl CoverRequest {
             is_pc: matches!(g.platform, Platform::Pc | Platform::Other),
             aspect: crate::render::front_aspect(cfg, g.platform),
             want_metadata: cfg.covers.fetch_metadata && g.description.is_empty(),
-            banner_bg: cfg.display.platform_banners.then(|| g.platform.banner()).flatten().map(|b| [(b.bg >> 16) as u8, (b.bg >> 8) as u8, b.bg as u8]),
+            // PC art (Steam and the like) never has a banner printed on it to cut off, and only
+            // banners across the top are looked for.
+            banner_bg: (cfg.display.platform_banners && g.platform != Platform::Pc).then(|| g.platform.banner()).flatten().filter(|b| !b.side).map(|b| [(b.bg >> 16) as u8, (b.bg >> 8) as u8, b.bg as u8]),
         }
     }
 }
@@ -237,8 +239,6 @@ struct Worker {
     settings: Covers,
     font: Arc<Option<fontdue::Font>>,
     steam_caches: Vec<PathBuf>,
-    /// Files read for the texture being made (see `ready`).
-    deps: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl CoverService {
@@ -258,6 +258,8 @@ impl CoverService {
             .map(|r| r.join("appcache").join("librarycache"))
             .filter(|p| p.is_dir())
             .collect();
+        // Drop the finished-texture cache older builds kept on disk.
+        std::thread::spawn(|| { let _ = std::fs::remove_dir_all(cache_dir().join("ready")); });
         let shared = Arc::new(std::sync::RwLock::new(settings.clone()));
         for _ in 0..4 {
             let mut w = Worker {
@@ -267,7 +269,6 @@ impl CoverService {
                 settings: settings.clone(),
                 font: font.clone(),
                 steam_caches: steam_caches.clone(),
-                deps: Default::default(),
             };
             let (job_rx, res_tx) = (job_rx.clone(), res_tx.clone());
             std::thread::spawn(move || {
@@ -277,8 +278,8 @@ impl CoverService {
                     }
                     match job {
                         Job::Cover(req) => {
-                            let msg = match w.ready(&req.id, "cover", &req, || w.load_cover(&req)) {
-                                Some((c, _)) => CoverMsg::Cover(c),
+                            let msg = match w.load_cover(&req) {
+                                Some(c) => CoverMsg::Cover(c),
                                 None => CoverMsg::Missing(req.id.clone()),
                             };
                             let _ = res_tx.send(msg);
@@ -289,23 +290,17 @@ impl CoverService {
                             }
                         }
                         Job::Back(req) => {
-                            if let Some((b, fresh)) = w.ready(&req.id, "back", &req, || Some(w.make_back(&req))) {
-                                if fresh || !made_file(&b.id, ArtKind::Back).is_file() {
-                                    keep_made(&b, ArtKind::Back);
-                                }
-                                let _ = res_tx.send(CoverMsg::Back(b));
-                            }
+                            let b = w.make_back(&req);
+                            keep_made(&b, ArtKind::Back);
+                            let _ = res_tx.send(CoverMsg::Back(b));
                         }
                         Job::Spine(req) => {
-                            if let Some((s, fresh)) = w.ready(&req.id, "spine", &req, || Some(w.make_spine(&req))) {
-                                if fresh || !made_file(&s.id, ArtKind::Spine).is_file() {
-                                    keep_made(&s, ArtKind::Spine);
-                                }
-                                let _ = res_tx.send(CoverMsg::Spine(s));
-                            }
+                            let s = w.make_spine(&req);
+                            keep_made(&s, ArtKind::Spine);
+                            let _ = res_tx.send(CoverMsg::Spine(s));
                         }
                         Job::Backdrop(req) => {
-                            if let Some((b, _)) = w.ready(&req.id, "backdrop", &req, || w.make_backdrop(&req)) {
+                            if let Some(b) = w.make_backdrop(&req) {
                                 let _ = res_tx.send(CoverMsg::Backdrop(b));
                             }
                         }
@@ -317,11 +312,8 @@ impl CoverService {
                             let _ = res_tx.send(CoverMsg::Pages(w.make_pages(&req)));
                         }
                         Job::Art(req) => {
-                            let what = format!("{:?}", req.kind).to_lowercase();
-                            if let Some((a, fresh)) = w.ready(&req.game.id, &what, &req, || w.make_art(&req)) {
-                                if fresh || !made_file(&a.id, req.kind).is_file() {
-                                    keep_made(&a, req.kind);
-                                }
+                            if let Some(a) = w.make_art(&req) {
+                                keep_made(&a, req.kind);
                                 let _ = res_tx.send(CoverMsg::Art(req.kind, a));
                             }
                         }
@@ -428,7 +420,7 @@ pub fn forget_all_art(id: &str) {
     crate::launchbox::forget(id);
     let safe = safe_name(id);
     let lower = safe.to_lowercase();
-    for kind in ["backs", "discs", "fanart", "heroes", "logos", "pageshots", "snaps", "spines", "made", "ready"] {
+    for kind in ["backs", "discs", "fanart", "heroes", "logos", "pageshots", "snaps", "spines", "made"] {
         let Ok(rd) = std::fs::read_dir(cache_dir().join(kind)) else { continue };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
@@ -470,13 +462,13 @@ impl Worker {
         let s = &self.settings;
         // 1. user supplied image
         if let Some(p) = &req.cover_path {
-            if let Some(img) = self.read_file(Path::new(p)).and_then(|b| image::load_from_memory(&b).ok()) {
+            if let Some(img) = std::fs::read(Path::new(p)).ok().and_then(|b| image::load_from_memory(&b).ok()) {
                 return Some(self.finish_cover(req, img));
             }
         }
         // 2. disk cache
         let file = cache_file(&self.cache, &req.id);
-        let cached = self.read_file(&file).and_then(|b| image::load_from_memory(&b).ok());
+        let cached = std::fs::read(&file).ok().and_then(|b| image::load_from_memory(&b).ok());
         if cached.is_none() {
             let _ = std::fs::remove_file(&file);
         }
@@ -612,7 +604,7 @@ impl Worker {
         let mut out = Vec::new();
         for n in 0..2 {
             let f = dir.join(format!("{}_{n}.img", safe_name(&req.id)));
-            if let Some(img) = self.read_file(&f).and_then(|b| image::load_from_memory(&b).ok()) {
+            if let Some(img) = std::fs::read(&f).ok().and_then(|b| image::load_from_memory(&b).ok()) {
                 out.push(img.to_rgba8());
             }
         }
@@ -671,7 +663,7 @@ impl Worker {
         let dir = cache_dir().join(kind);
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join(format!("{}.img", safe_name(id)));
-        if let Some(img) = self.read_file(&f).and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = std::fs::read(&f).ok().and_then(|b| image::load_from_memory(&b).ok()) {
             return Some(img);
         }
         if !self.settings.enabled {
@@ -689,8 +681,8 @@ impl Worker {
     fn cover_image(&self, id: &str, cover_path: &Option<String>) -> Option<RgbaImage> {
         cover_path
             .as_ref()
-            .and_then(|p| self.read_file(Path::new(p)))
-            .or_else(|| self.read_file(&cache_file(&self.cache, id)))
+            .and_then(|p| std::fs::read(Path::new(p)).ok())
+            .or_else(|| std::fs::read(&cache_file(&self.cache, id)).ok())
             .and_then(|b| image::load_from_memory(&b).ok())
             .map(|i| i.to_rgba8())
     }
@@ -703,7 +695,7 @@ impl Worker {
             files.sort();
             for f in files {
                 if f.file_name().is_some_and(|n| n.to_string_lossy().starts_with(prefix)) {
-                    if let Some(img) = self.read_file(&f).and_then(|b| image::load_from_memory(&b).ok()) {
+                    if let Some(img) = std::fs::read(&f).ok().and_then(|b| image::load_from_memory(&b).ok()) {
                         return Some(img);
                     }
                 }
@@ -733,7 +725,7 @@ impl Worker {
             CoverReady { id: req.id.clone(), width: w, height: h, rgba: img.into_raw(), dominant: [0.0; 3] }
         };
         // 0. The user's pick (stood upright if it lies down).
-        if let Some(img) = req.chosen.as_ref().and_then(|p| self.read_file(Path::new(p))).and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = req.chosen.as_ref().and_then(|p| std::fs::read(Path::new(p)).ok()).and_then(|b| image::load_from_memory(&b).ok()) {
             let mut img = img.to_rgba8();
             if img.width() > img.height() {
                 img = imageops::rotate90(&img);
@@ -804,7 +796,7 @@ impl Worker {
 
     fn make_back(&self, req: &BackRequest) -> CoverReady {
         // The user's pick first.
-        if let Some(img) = req.chosen.as_ref().and_then(|p| self.read_file(Path::new(p))).and_then(|b| image::load_from_memory(&b).ok()) {
+        if let Some(img) = req.chosen.as_ref().and_then(|p| std::fs::read(Path::new(p)).ok()).and_then(|b| image::load_from_memory(&b).ok()) {
             let fitted = fit_to_aspect(&img.to_rgba8(), req.aspect, self.settings.max_texture_size);
             let (w, h) = fitted.dimensions();
             return CoverReady { id: req.id.clone(), width: w, height: h, rgba: fitted.into_raw(), dominant: [0.0; 3] };
@@ -861,7 +853,7 @@ impl Worker {
             CoverReady { id: id.clone(), width: w, height: h, rgba: img.into_raw(), dominant: [0.0; 3] }
         };
         if let Some(p) = &req.chosen {
-            let img = self.read_file(Path::new(p)).and_then(|b| image::load_from_memory(&b).ok())?.to_rgba8();
+            let img = std::fs::read(Path::new(p)).ok().and_then(|b| image::load_from_memory(&b).ok())?.to_rgba8();
             return Some(done(cover_fill(&img, (max as f32 * req.aspect.min(1.0)) as u32, (max as f32 / req.aspect.max(1.0)) as u32)));
         }
         match req.kind {
@@ -1032,12 +1024,6 @@ const MISS_TTL: Duration = Duration::from_secs(7 * 86400);
 /// is still used when the API cannot be reached.
 const API_TTL: Duration = Duration::from_secs(14 * 86400);
 
-thread_local! {
-    /// Set when a download failed for a reason that may pass (offline, timeout, rate limit,
-    /// server error), so what was made without it is not kept.
-    static NET_TROUBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// FNV-1a: a hash that stays the same across builds, for file names in the cache.
 fn stable_hash(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
@@ -1073,12 +1059,7 @@ fn http_get(agent: &ureq::Agent, url: &str, headers: &[(&str, &str)]) -> Option<
             mark_miss(url);
             None
         }
-        Err(e) => {
-            if !matches!(e, ureq::Error::Status(400..=403, _)) {
-                NET_TROUBLE.with(|t| t.set(true));
-            }
-            None
-        }
+        Err(_) => None,
     }
 }
 
@@ -1086,7 +1067,6 @@ fn http_bytes(agent: &ureq::Agent, url: &str, limit: u64) -> Option<Vec<u8>> {
     let resp = http_get(agent, url, &[])?;
     let mut buf = Vec::new();
     if resp.into_reader().take(limit).read_to_end(&mut buf).is_err() {
-        NET_TROUBLE.with(|t| t.set(true));
         return None;
     }
     if buf.len() < 512 {
@@ -1113,104 +1093,6 @@ fn http_json(agent: &ureq::Agent, url: &str, headers: &[(&str, &str)], ttl: Dura
             Some(v)
         }
         None => stored(),
-    }
-}
-
-// ------------------------------------------------------------------------------------------------
-// Finished textures
-// ------------------------------------------------------------------------------------------------
-
-/// A finished texture is made again at least this often (a better cover may have turned up).
-const READY_TTL: Duration = Duration::from_secs(7 * 86400);
-
-/// What a finished texture was made from: the request, the build that made it, and each file
-/// it read with its time stamp (None: the file was not there).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ReadyMeta {
-    sig: u64,
-    deps: Vec<(PathBuf, Option<u64>)>,
-    dominant: [f32; 3],
-    png: bool,
-}
-
-fn stamp(p: &Path) -> Option<u64> {
-    let t = std::fs::metadata(p).and_then(|m| m.modified()).ok()?;
-    Some(t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos() as u64)
-}
-
-/// Changes with every build, so art made by older drawing code is made again.
-fn build_stamp() -> u64 {
-    static S: OnceLock<u64> = OnceLock::new();
-    *S.get_or_init(|| std::env::current_exe().ok().and_then(|e| Some(stamp(&e)? ^ std::fs::metadata(&e).ok()?.len())).unwrap_or(0))
-}
-
-fn ready_base(id: &str, what: &str) -> PathBuf {
-    cache_dir().join("ready").join(format!("{}_{what}", safe_name(id)))
-}
-
-fn load_ready(id: &str, what: &str, sig: u64) -> Option<CoverReady> {
-    let base = ready_base(id, what);
-    let json = base.with_extension("json");
-    if age(&json).is_none_or(|a| a > READY_TTL) {
-        return None;
-    }
-    let meta: ReadyMeta = serde_json::from_slice(&std::fs::read(&json).ok()?).ok()?;
-    if meta.sig != sig || meta.deps.iter().any(|(p, s)| stamp(p) != *s) {
-        return None;
-    }
-    let img = image::load_from_memory(&std::fs::read(base.with_extension(if meta.png { "png" } else { "jpg" })).ok()?).ok()?.to_rgba8();
-    let (width, height) = img.dimensions();
-    Some(CoverReady { id: id.to_string(), width, height, rgba: img.into_raw(), dominant: meta.dominant })
-}
-
-/// Opaque art as a high quality JPEG (small, quick to decode), art with see-through parts as PNG.
-fn save_ready(what: &str, sig: u64, deps: Vec<(PathBuf, Option<u64>)>, c: &CoverReady) {
-    use image::ImageEncoder;
-    let base = ready_base(&c.id, what);
-    let _ = std::fs::create_dir_all(base.parent().unwrap_or(Path::new(".")));
-    let png = c.rgba.chunks_exact(4).any(|p| p[3] != 255);
-    let mut buf = Vec::new();
-    let ok = if png {
-        image::codecs::png::PngEncoder::new_with_quality(&mut buf, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Sub)
-            .write_image(&c.rgba, c.width, c.height, image::ExtendedColorType::Rgba8)
-            .is_ok()
-    } else {
-        let rgb: Vec<u8> = c.rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 94).write_image(&rgb, c.width, c.height, image::ExtendedColorType::Rgb8).is_ok()
-    };
-    if !ok || std::fs::write(base.with_extension(if png { "png" } else { "jpg" }), &buf).is_err() {
-        return;
-    }
-    let meta = ReadyMeta { sig, deps, dominant: c.dominant, png };
-    let _ = std::fs::write(base.with_extension("json"), serde_json::to_vec(&meta).unwrap_or_default());
-}
-
-impl Worker {
-    /// Reads a source file and remembers it as something the texture being made depends on.
-    fn read_file(&self, p: &Path) -> Option<Vec<u8>> {
-        self.deps.borrow_mut().push(p.to_path_buf());
-        std::fs::read(p).ok()
-    }
-
-    /// The finished texture `what` for a game: from the disk when nothing it was made from has
-    /// changed, else made by `make` and stored. The flag is true when it was just made.
-    fn ready(&self, id: &str, what: &str, req: &dyn std::fmt::Debug, make: impl FnOnce() -> Option<CoverReady>) -> Option<(CoverReady, bool)> {
-        let sig = stable_hash(&format!("{}|{what}|{req:?}|{}|{:?}|{:?}", build_stamp(), self.settings.max_texture_size, self.settings.sources, self.lb(id)));
-        if let Some(c) = load_ready(id, what, sig) {
-            return Some((c, false));
-        }
-        self.deps.borrow_mut().clear();
-        NET_TROUBLE.with(|t| t.set(false));
-        let c = make()?;
-        if !NET_TROUBLE.with(|t| t.get()) {
-            let mut paths = std::mem::take(&mut *self.deps.borrow_mut());
-            paths.sort();
-            paths.dedup();
-            // Stamped now, after the job, so files it downloaded count as they are.
-            let deps = paths.into_iter().map(|p| (p.clone(), stamp(&p))).collect();
-            save_ready(what, sig, deps, &c);
-        }
-        Some((c, true))
     }
 }
 
@@ -1965,6 +1847,8 @@ pub struct ArtSource {
     pub libretro_system: Option<String>,
     pub path: Option<String>,
     pub sgdb_key: String,
+    /// Surfaces showing art the user picked (their made art is not the automatic one).
+    pub chosen: Vec<ArtKind>,
 }
 
 impl ArtSource {
@@ -1977,6 +1861,16 @@ impl ArtSource {
             libretro_system: libretro_system(g, cfg),
             path: g.path.clone(),
             sgdb_key: cfg.covers.steamgriddb_api_key.clone(),
+            chosen: [
+                (ArtKind::Media, &g.media_art),
+                (ArtKind::Insert, &g.insert_art),
+                (ArtKind::Back, &g.back_art),
+                (ArtKind::Spine, &g.spine_art),
+            ]
+            .into_iter()
+            .filter(|(_, a)| a.is_some())
+            .map(|(k, _)| k)
+            .collect(),
         }
     }
 }
@@ -1996,24 +1890,23 @@ pub fn art_candidates(src: &ArtSource) -> Vec<ArtCandidate> {
     let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(6)).timeout(Duration::from_secs(20)).user_agent("slipcase/0.1").build();
     let mut out: Vec<ArtCandidate> = Vec::new();
     let mut add = |key: &'static str, label: &str, src: String| {
-        if !out.iter().any(|c| c.src == src) {
+        if key.starts_with("auto_") || !out.iter().any(|c| c.src == src) {
             out.push(ArtCandidate { key, label: label.to_string(), src });
         }
     };
-    // The cover in use now.
-    let current = src.cover_path.clone().or_else(|| {
-        let f = cache_file(&cache_dir().join("covers"), &src.id);
-        f.is_file().then(|| f.to_string_lossy().into_owned())
-    });
-    if let Some(c) = current {
-        add("current", "Current cover", c);
+    // First on each surface's tab: going back to automatic, shown with the art found or made
+    // for it ("auto:" when there is none to show yet).
+    let auto_cover = cache_file(&cache_dir().join("covers"), &src.id);
+    let thumb = |f: PathBuf, kind: ArtKind| if f.is_file() { f.to_string_lossy().into_owned() } else { format!("auto:{kind:?}") };
+    add("auto_cover", "Automatic", thumb(auto_cover.clone(), ArtKind::Cover));
+    for (kind, key) in [(ArtKind::Media, "auto_media"), (ArtKind::Insert, "auto_insert"), (ArtKind::Back, "auto_back"), (ArtKind::Spine, "auto_spine")] {
+        let made = if src.chosen.contains(&kind) { PathBuf::new() } else { made_file(&src.id, kind) };
+        add(key, "Automatic", thumb(made, kind));
     }
-    // What each other surface shows now (made automatically or picked before).
-    for (kind, key) in [(ArtKind::Media, "made_media"), (ArtKind::Insert, "made_insert"), (ArtKind::Back, "made_back"), (ArtKind::Spine, "made_spine")] {
-        let f = made_file(&src.id, kind);
-        if f.is_file() {
-            add(key, "In use now", f.to_string_lossy().into_owned());
-        }
+    // The cover in use now, as art for the other surfaces.
+    let current = src.cover_path.clone().or_else(|| auto_cover.is_file().then(|| auto_cover.to_string_lossy().into_owned()));
+    if let Some(c) = current {
+        add("current", "Cover", c);
     }
     if let Some(a) = crate::launchbox::assets(&src.id) {
         let lb = |f: &Option<String>| f.as_ref().map(|f| crate::launchbox::url(f));

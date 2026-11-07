@@ -582,6 +582,9 @@ impl Plugin for LauncherPlugin {
             .add_systems(Last, save_on_exit)
             .add_systems(Update, apply_cameras)
             .add_systems(Update, place_window)
+            .add_systems(Update, fit_ui_scale)
+            .add_systems(Update, crate::toss::toss_input.before(gather_mouse))
+            .add_systems(Update, crate::toss::toss_step.after(crate::toss::toss_input).before(animate_items))
             .add_systems(Update, apply_covers.after(apply_spines).before(animate_items))
             .add_systems(Update, crate::egg::egg_input.after(gather_mouse).after(gather_keyboard).after(gather_gamepad).before(handle_actions))
             .add_systems(Update, crate::egg::egg_run.after(receive_covers).before(animate_items))
@@ -790,6 +793,18 @@ fn setup(
     ));
 
     setup_ui(&mut commands, &mut images);
+}
+
+/// Sizes the menus and text to the window: as designed at 1080 (logical) pixels tall, larger
+/// on bigger screens and smaller on small ones, so they take the same share of the screen.
+/// The "UI scale" setting multiplies that.
+fn fit_ui_scale(windows: Query<&Window, With<PrimaryWindow>>, cfg: Res<Config>, menu: Res<crate::settings::Menu>, mut scale: ResMut<UiScale>) {
+    let Ok(w) = windows.get_single() else { return };
+    let setting = menu.ui_scale_hold.unwrap_or(cfg.general.ui_scale);
+    let want = (w.height() / 1080.0).clamp(0.6, 3.0) * setting.clamp(0.5, 2.0);
+    if (scale.0 - want).abs() > 0.01 {
+        scale.0 = want;
+    }
 }
 
 fn text(size: f32, color: Color) -> TextBundle {
@@ -1057,6 +1072,9 @@ struct Drag {
     /// Left-drag speed (pixels a second), and the speed it carries on at once let go.
     vel: Vec2,
     coast: Vec2,
+    /// The wheel moved the games since the cursor last did: whatever slid under the cursor
+    /// is not leaned until the mouse moves (it would tip on a corner the user never pointed at).
+    wheeled: bool,
 }
 
 /// Left-drag (and its coasting afterwards) by `d` pixels: pans the wall / table, or scrubs
@@ -1113,7 +1131,7 @@ fn drag_scroll(view: &mut ViewState, cfg: &Config, window: &Window, d: Vec2, acc
 /// Which item is under the cursor (ray against each item's oriented bounding box).
 /// The item under the cursor, with where on it the cursor is: (index, offset across the face
 /// it hit in -1..1 item units, that face's normal), all in item space.
-fn pick_at(
+pub(crate) fn pick_at(
     window: &Window,
     camera: &Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     items: &Query<(&Item, &GlobalTransform, &InheritedVisibility)>,
@@ -1302,6 +1320,8 @@ fn gather_mouse(
     items: Query<(&Item, &GlobalTransform, &InheritedVisibility)>,
     ui: Query<&Interaction>,
     mut out: ResMut<Actions>,
+    menu: Res<crate::settings::Menu>,
+    toss: Res<crate::toss::Toss>,
 ) {
     // The easter egg has the mouse to itself (dragging cases round its table).
     if view.egg {
@@ -1315,12 +1335,15 @@ fn gather_mouse(
     // the panel (`over_ui` below); the keyboard stays with the menu.
     let grid = cfg.display.layout.is_grid();
     let over_ui = ui.iter().any(|i| *i != Interaction::None);
+    // A click beside the open settings only closes them (see `menu_input`).
+    let closing_click = menu.open || menu.just_closed;
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     for e in wheel.read() {
         let y = if e.unit == MouseScrollUnit::Pixel { e.y / 40.0 } else { e.y };
         if y == 0.0 || over_ui {
             continue;
         }
+        drag.wheeled = true;
         if view.inspecting() {
             if ctrl {
                 // Closer to / further from the open case: the same zoom as when browsing.
@@ -1354,14 +1377,19 @@ fn gather_mouse(
             view.grid_target = t;
             view.grid_free = true;
         } else {
-            out.0.push(if y > 0.0 { Action::Left } else { Action::Right });
+            // The bookshelf runs the other way round (wheel up goes on along the shelf).
+            let up = if cfg.display.layout == LayoutKind::Shelf { y < 0.0 } else { y > 0.0 };
+            out.0.push(if up { Action::Left } else { Action::Right });
         }
     }
 
     let delta: Vec2 = motion.read().map(|m| m.delta).sum();
+    if delta != Vec2::ZERO {
+        drag.wheeled = false;
+    }
     let Ok(window) = windows.get_single() else { return };
     if view.inspecting() {
-        inspect_mouse(&mut view, &cfg, window, delta, &buttons, &camera, &items, over_ui, &mut drag, time.elapsed_seconds(), &mut out);
+        inspect_mouse(&mut view, &cfg, window, delta, &buttons, &camera, &items, over_ui || closing_click, &mut drag, time.elapsed_seconds(), &mut out);
         return;
     }
     // What is under the cursor (for the hover highlight).
@@ -1377,12 +1405,26 @@ fn gather_mouse(
     // would slide the spine out from under the cursor.
     // Narrow faces (spine, opening edge, top and bottom edge) barely move: on a game lying on
     // its side, or a spine in a row, leaning would slide it out from under the cursor.
-    let narrow = |n: Vec3| if n.x.abs() > 0.5 || n.y.abs() > 0.5 { 0.04 } else { 1.0 };
-    view.hover_tilt = hit.map_or(Vec3::ZERO, |(_, r, n)| {
+    // In layouts packed spine out (bookshelf, stacks, towers, piles) the games are thin
+    // targets side by side: the spine does not lean at all, and the rest only a little, so
+    // the game under the cursor stays put while aiming at it.
+    let packed = matches!(
+        cfg.display.layout,
+        LayoutKind::Shelf | LayoutKind::Stack | LayoutKind::Pile | LayoutKind::Stacks | LayoutKind::Towers | LayoutKind::MessyTowers
+    );
+    let narrow = |n: Vec3| match (n.x.abs() > 0.5 || n.y.abs() > 0.5, packed) {
+        (true, true) => 0.0,
+        (true, false) => 0.04,
+        (false, true) => 0.25,
+        (false, false) => 1.0,
+    };
+    let strength = cfg.display.hover_tilt_strength.clamp(0.0, 3.0);
+    let lean = hit.filter(|_| !drag.wheeled);
+    view.hover_tilt = lean.map_or(Vec3::ZERO, |(_, r, n)| {
         let eased = Vec3::new(r.x.signum() * r.x.abs().powf(1.8), r.y.signum() * r.y.abs().powf(1.8), r.z.signum() * r.z.abs().powf(1.8));
-        eased.cross(-n) * 0.34 * narrow(n)
+        eased.cross(-n) * 0.34 * narrow(n) * strength
     });
-    view.hover_away = hit.map_or(Vec3::ZERO, |(_, r, n)| -r.normalize_or_zero() * r.length().min(1.0) * narrow(n));
+    view.hover_away = lean.map_or(Vec3::ZERO, |(_, r, n)| -r.normalize_or_zero() * r.length().min(1.0) * narrow(n) * strength);
     view.hover_spine = hit.is_some_and(|(_, _, n)| n.x.abs() > 0.5 || n.y.abs() > 0.5);
     view.hover_normal = hit.map_or(Vec3::ZERO, |(_, _, n)| n);
     let sens = cfg.display.mouse_sensitivity.max(0.05);
@@ -1401,7 +1443,8 @@ fn gather_mouse(
         drag.coast = Vec2::ZERO;
     }
     for b in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
-        if buttons.just_pressed(b) && drag.button.is_none() && !over_ui {
+        // (A Ctrl / Shift + left press that picked a game up is not a drag.)
+        if buttons.just_pressed(b) && drag.button.is_none() && !over_ui && !closing_click && !(toss.took_press && b == MouseButton::Left) {
             drag.button = Some(b);
             drag.vel = Vec2::ZERO;
             drag.moved = 0.0;
@@ -2597,6 +2640,7 @@ fn animate_items(
     mut decor: Query<(&mut Transform, &mut Visibility), (With<ShelfDecor>, Without<Item>)>,
     launch: Res<LaunchAnim>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    mut toss: ResMut<crate::toss::Toss>,
 ) {
     let dt = time.delta_seconds().min(0.1);
     let t = time.elapsed_seconds();
@@ -2705,6 +2749,7 @@ fn animate_items(
     }
 
     let kk = 1.0 - (-dt * 12.0 * cfg.animation.speed).exp();
+    let motion = cfg.animation.motion.as_str();
     let k_hover = 1.0 - (-dt * 32.0 * cfg.animation.speed).exp();
     let sway = cfg.animation.idle_sway;
     let grid = cfg.display.layout.is_grid();
@@ -2768,6 +2813,20 @@ fn animate_items(
             fade.value = 0.0;
         }
         let a = if lowered { 0.0 } else { (1.0 - view.rel(item.view_index).abs()).max(0.0) };
+        // The selection sits the same distance from the camera in every layout ("Selected game
+        // distance", scaled with the zoom): moved along its line from the camera, so it stays
+        // at the same spot on screen.
+        if a > 0.0 {
+            let (cam, look) = layouts::camera_for(&view.params);
+            let cam = look + (cam - look) * view.zoom;
+            let to = pose.pos - cam;
+            let d = to.length();
+            if d > 1e-3 {
+                let want = cfg.display.selected_distance.clamp(5.0, 200.0) * view.zoom;
+                let e = a * a * (3.0 - 2.0 * a);
+                pose.pos = cam + to / d * (d + (want - d) * e);
+            }
+        }
         if a > 0.0 {
             pose.pos.y += (t * 1.7).sin() * 0.22 * sway * a;
             pose.rot = pose.rot * Quat::from_rotation_y((t * 0.9).sin() * 0.05 * sway * a + view.spin * a);
@@ -2875,6 +2934,39 @@ fn animate_items(
                 pose.pos += towards_camera * (spring * 1.4 * pose.scale);
             }
         }
+        // Picked up and loose (see `toss`): physics has it. Knocked by one: physics has it too,
+        // pulled towards where the display wants it.
+        let mut shoved = None;
+        match toss.part(&item.game_id, t) {
+            crate::toss::Part::Placed(p, r) => {
+                tf.translation = p;
+                tf.rotation = r;
+                fade.value = 1.0;
+                *vis = Visibility::Inherited;
+                continue;
+            }
+            crate::toss::Part::Away => {
+                *vis = Visibility::Hidden;
+                continue;
+            }
+            crate::toss::Part::Shoved(p, r) => {
+                toss.set_place(&item.game_id, pose.pos, pose.rot);
+                shoved = Some((p, r));
+            }
+            crate::toss::Part::Returning(e, first) => {
+                // Back from the void: slides in from in front of its place, easing off.
+                let (cam_pos, look) = layouts::camera_for(&view.params);
+                let towards_camera = (cam_pos - look).normalize_or(Vec3::Z);
+                let ease = 1.0 - (1.0 - e).powi(3);
+                pose.pos += towards_camera * ((1.0 - ease) * 30.0 * pose.scale);
+                if first {
+                    fade.value = 0.0;
+                }
+                tf.translation = pose.pos;
+                tf.rotation = pose.rot;
+            }
+            crate::toss::Part::Normal => {}
+        }
         // Fade in and out at the edges rather than popping (also fades new items in).
         let fk = 1.0 - (-dt * 8.0).exp();
         fade.value += (pose.fade - fade.value) * fk;
@@ -2893,6 +2985,27 @@ fn animate_items(
             || (view.inspecting() && view.inspect.as_deref() == Some(item.game_id.as_str()) && view.inspect_t >= 1.0)
             || view.bounce.is_some_and(|(i, at)| i == item.view_index && t - at < 0.6);
         let k = if hands_on { k_hover } else { kk };
+        // "Selection motion": the path a game takes on its way (same speed), strongest when it
+        // sets off and gone by the time it arrives.
+        if !hands_on && launch.game.is_none() && view.inspect.is_none() {
+            let travel = pose.pos - tf.translation;
+            let d = travel.length().min(40.0);
+            let side = if travel.x < 0.0 { -1.0 } else { 1.0 };
+            match motion {
+                "flip" => pose.rot = Quat::from_rotation_y(side * (d * 0.12).min(2.6)) * pose.rot,
+                "tumble" => pose.rot = Quat::from_rotation_x(-(d * 0.1).min(2.2)) * pose.rot,
+                "roll" => pose.rot = Quat::from_rotation_z(-side * (d * 0.05).min(0.9)) * pose.rot,
+                "dip" => pose.pos.z -= d * 0.6,
+                "swoop" => pose.pos.z += d * 0.4,
+                _ => {}
+            }
+        }
+        if let Some((p, r)) = shoved {
+            tf.translation = p;
+            tf.rotation = r;
+            tf.scale = tf.scale.lerp(Vec3::splat(pose.scale), k);
+            continue;
+        }
         tf.translation = tf.translation.lerp(pose.pos, k);
         // A turned item takes its rotation straight from the (already smoothed) turn: easing
         // it again would take the short way round and stutter during a fast spin.
