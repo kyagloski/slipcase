@@ -859,7 +859,15 @@ fn setup_ui(commands: &mut Commands, images: &mut Assets<Image>) {
             })
             .with_children(|top| {
                 top.spawn((text(17.0, Color::srgba(1.0, 1.0, 1.0, 0.75)), UiTop));
-                top.spawn((text(20.0, Color::srgb(1.0, 0.92, 0.5)), UiSearch));
+                // The search / filter, centred across the top.
+                top.spawn(NodeBundle {
+                    style: Style { position_type: PositionType::Absolute, left: Val::Px(0.0), right: Val::Px(0.0), justify_content: JustifyContent::Center, ..default() },
+                    focus_policy: bevy::ui::FocusPolicy::Pass,
+                    ..default()
+                })
+                .with_children(|c| {
+                    c.spawn((text(20.0, Color::srgb(1.0, 0.92, 0.5)), UiSearch));
+                });
             });
             root.spawn(NodeBundle {
                 style: Style { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: Val::Px(6.0), ..default() },
@@ -1069,6 +1077,8 @@ struct Drag {
     last_click_index: Option<usize>,
     /// When the current button went down (for telling a short click from a hold).
     pressed_at: f32,
+    /// The held button turns the selection (right, or left pressed on the selected game).
+    turn: bool,
     /// Left-drag speed (pixels a second), and the speed it carries on at once let go.
     vel: Vec2,
     coast: Vec2,
@@ -1240,6 +1250,10 @@ fn inspect_mouse(
                     view.insert_flipped += 1;
                 }
                 drag.last_click_index = None;
+            } else if b == MouseButton::Left && drag.moved <= 4.0 && !over_open_case(view, window, camera, items) {
+                // A click beside the open case closes it.
+                drag.last_click_index = None;
+                out.0.push(Action::CloseCase);
             } else if b == MouseButton::Left && drag.moved <= 4.0 {
                 if drag.last_click_index == Some(usize::MAX) && now - drag.last_click < 0.4 {
                     drag.last_click_index = None;
@@ -1300,6 +1314,23 @@ fn inspect_mouse(
         }
     }
     view.inspect_hover = hover;
+}
+
+/// The cursor is over the open case (tray and swung-open lid, side by side and centred on
+/// `open_shift` to the left of the case's own middle), checked on the case's front plane.
+fn over_open_case(view: &ViewState, window: &Window, camera: &Query<(&Camera, &GlobalTransform), With<MainCamera>>, items: &Query<(&Item, &GlobalTransform, &InheritedVisibility)>) -> bool {
+    let Some(id) = view.inspect.as_ref() else { return false };
+    let Some((item, tf, _)) = items.iter().find(|(i, ..)| i.game_id == *id) else { return false };
+    let (Some(cursor), Ok((cam, cam_tf))) = (window.cursor_position(), camera.get_single()) else { return true };
+    let Some(ray) = cam.viewport_to_world(cam_tf, cursor) else { return true };
+    let inv = tf.affine().inverse();
+    let (o, d) = (inv.transform_point3(ray.origin), inv.transform_vector3(*ray.direction));
+    if d.z.abs() < 1e-6 {
+        return true;
+    }
+    let p = o + d * (-o.z / d.z);
+    let shift = item.rig.as_ref().map_or(0.0, |r| r.open_shift);
+    (p.x + shift).abs() < item.dims.x * 1.05 && p.y.abs() < item.dims.y * 0.55
 }
 
 /// Mouse: wheel browses (ctrl + wheel zooms). Left drag pans the wall / scrubs through the
@@ -1395,29 +1426,19 @@ fn gather_mouse(
     // What is under the cursor (for the hover highlight).
     let hit = if over_ui || drag.button.is_some() { None } else { pick_at(window, &camera, &items, view.hovered) };
     let hovered = hit.map(|(i, ..)| i);
+    // A click anywhere while typing a filter stops typing (the filter stays, like Enter).
+    if view.searching && buttons.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
+        view.searching = false;
+    }
     if view.hovered != hovered {
         view.hovered = hovered;
     }
     // Pressing on a spot pushes it in, like the Steam library: each direction across the face
     // tilts on its own, barely near the middle and strongly near the edges (the offset is
     // eased per axis), so corners tilt on both axes at once.
-    // On a spine (or the opening edge) the face is narrow, so the item barely moves; leaning it
-    // would slide the spine out from under the cursor.
-    // Narrow faces (spine, opening edge, top and bottom edge) barely move: on a game lying on
-    // its side, or a spine in a row, leaning would slide it out from under the cursor.
-    // In layouts packed spine out (bookshelf, stacks, towers, piles) the games are thin
-    // targets side by side: the spine does not lean at all, and the rest only a little, so
-    // the game under the cursor stays put while aiming at it.
-    let packed = matches!(
-        cfg.display.layout,
-        LayoutKind::Shelf | LayoutKind::Stack | LayoutKind::Pile | LayoutKind::Stacks | LayoutKind::Towers | LayoutKind::MessyTowers
-    );
-    let narrow = |n: Vec3| match (n.x.abs() > 0.5 || n.y.abs() > 0.5, packed) {
-        (true, true) => 0.0,
-        (true, false) => 0.04,
-        (false, true) => 0.25,
-        (false, false) => 1.0,
-    };
+    // Spines and edges never lean (they are thin targets, and leaning would slide them out
+    // from under the cursor); covers lean the same in every layout.
+    let narrow = |n: Vec3| if n.x.abs() > 0.5 || n.y.abs() > 0.5 { 0.0 } else { 1.0 };
     let strength = cfg.display.hover_tilt_strength.clamp(0.0, 3.0);
     let lean = hit.filter(|_| !drag.wheeled);
     view.hover_tilt = lean.map_or(Vec3::ZERO, |(_, r, n)| {
@@ -1443,13 +1464,15 @@ fn gather_mouse(
         drag.coast = Vec2::ZERO;
     }
     for b in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
-        // (A Ctrl / Shift + left press that picked a game up is not a drag.)
-        if buttons.just_pressed(b) && drag.button.is_none() && !over_ui && !closing_click && !(toss.took_press && b == MouseButton::Left) {
+        // With Ctrl / Shift held the left button only picks games up (see `toss`), never drags.
+        let grabbing = toss.took_press || keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        if buttons.just_pressed(b) && drag.button.is_none() && !over_ui && !closing_click && !(grabbing && b == MouseButton::Left) {
             drag.button = Some(b);
             drag.vel = Vec2::ZERO;
             drag.moved = 0.0;
             drag.accum = Vec2::ZERO;
             drag.pressed_at = time.elapsed_seconds();
+            drag.turn = b == MouseButton::Right || (b == MouseButton::Left && hovered == Some(view.selected));
         }
     }
     let Some(button) = drag.button else { return };
@@ -1458,8 +1481,8 @@ fn gather_mouse(
     // Turning starts with the first movement (a right click does nothing else), so a quick
     // flick is not lost to the drag threshold.
     if buttons.pressed(button) && (drag.moved > 4.0 || button == MouseButton::Right) {
-        match button {
-            MouseButton::Right => {
+        match drag.turn {
+            true => {
                 let dx = delta.x * 0.011 * sens;
                 view.turn_target.x += dx;
                 view.turn_target.y = (view.turn_target.y + delta.y * 0.008 * sens).clamp(-1.3, 1.3);
@@ -1469,7 +1492,7 @@ fn gather_mouse(
                 view.turning = true;
                 view.free_turned = true;
             }
-            _ => {
+            false => {
                 drag_scroll(&mut view, &cfg, window, delta * sens, &mut drag.accum, &mut out);
                 // How fast it is being dragged (pixels a second, smoothed), kept when let go.
                 let dt = time.delta_seconds().max(1e-3);
@@ -1485,7 +1508,7 @@ fn gather_mouse(
             drag.coast = drag.vel;
         }
         // Done rotating: settle on the front or the back, whichever is nearer.
-        if button == MouseButton::Right {
+        if drag.turn {
             view.turning = false;
             // A flick keeps spinning (see animate_items); otherwise settle on front / back now.
             if view.spin_vel.abs() < 4.0 {
@@ -1494,6 +1517,8 @@ fn gather_mouse(
                     view.snap_turn();
                 }
             }
+        }
+        if button == MouseButton::Right {
             // A short right click (no drag) on a game flips it, selecting it first if needed.
             let short = time.elapsed_seconds() - drag.pressed_at < 0.35;
             if drag.moved <= 4.0 && short {
@@ -1524,6 +1549,10 @@ fn gather_mouse(
                 let now = time.elapsed_seconds();
                 if drag.last_click_index == Some(i) && now - drag.last_click < 0.4 {
                     out.0.push(Action::Launch);
+                    drag.last_click_index = None;
+                } else if i == view.selected && (!grid || view.raised) {
+                    // A click on the game already selected opens its case.
+                    out.0.push(Action::Open);
                     drag.last_click_index = None;
                 } else {
                     view.bounce = Some((i, now));
@@ -2751,6 +2780,7 @@ fn animate_items(
     let kk = 1.0 - (-dt * 12.0 * cfg.animation.speed).exp();
     let motion = cfg.animation.motion.as_str();
     let k_hover = 1.0 - (-dt * 32.0 * cfg.animation.speed).exp();
+    let bounce = cfg.animation.hover_bounce.clamp(0.0, 3.0);
     let sway = cfg.animation.idle_sway;
     let grid = cfg.display.layout.is_grid();
     // The wall cannot be zoomed in past the point where a whole row fills the screen.
@@ -2814,18 +2844,16 @@ fn animate_items(
         }
         let a = if lowered { 0.0 } else { (1.0 - view.rel(item.view_index).abs()).max(0.0) };
         // The selection sits the same distance from the camera in every layout ("Selected game
-        // distance", scaled with the zoom): moved along its line from the camera, so it stays
-        // at the same spot on screen.
-        if a > 0.0 {
-            let (cam, look) = layouts::camera_for(&view.params);
-            let cam = look + (cam - look) * view.zoom;
-            let to = pose.pos - cam;
-            let d = to.length();
-            if d > 1e-3 {
-                let want = cfg.display.selected_distance.clamp(5.0, 200.0) * view.zoom;
-                let e = a * a * (3.0 - 2.0 * a);
-                pose.pos = cam + to / d * (d + (want - d) * e);
-            }
+        // distance", scaled with the zoom): just it is moved out to it, along its line from the
+        // camera so it stays put on screen; the rest of the display stays where it is.
+        let (cam, look) = layouts::camera_for(&view.params);
+        let cam = look + (cam - look) * view.zoom;
+        let want = cfg.display.selected_distance.clamp(5.0, 200.0) * view.zoom;
+        let to = pose.pos - cam;
+        let d = to.length();
+        if a > 0.0 && d > 1e-3 {
+            let e = a * a * (3.0 - 2.0 * a);
+            pose.pos = cam + to / d * (d + (want - d) * e);
         }
         if a > 0.0 {
             pose.pos.y += (t * 1.7).sin() * 0.22 * sway * a;
@@ -2840,11 +2868,11 @@ fn animate_items(
             if view.hover_spine {
                 // Pulled a little way out of the stack, straight out past its spine, so the
                 // neighbours stay where they are and easy to point at.
-                pose.pos += pose.rot * (view.hover_normal * 0.5 * pose.scale);
+                pose.pos += pose.rot * (view.hover_normal * 0.5 * pose.scale * bounce);
             } else {
                 // Lift the item under the cursor slightly towards you.
-                pose.scale *= 1.02;
-                pose.pos.z += 0.3;
+                pose.scale *= 1.0 + 0.02 * bounce;
+                pose.pos.z += 0.3 * bounce;
             }
             let turned = item.view_index == view.selected && turning_now;
             if cfg.display.hover_tilt && view.hover_tilt != Vec3::ZERO && !turned {
@@ -3378,6 +3406,32 @@ fn animate_rigs(
         let arc = (out * PI).sin();
         let mut pos = rest.lerp(lifted, lift).lerp(held, out) + Vec3::Y * arc * rig.media_size * 0.15;
         let mut rot = Quat::from_rotation_x(-0.45 * arc) * Quat::from_rotation_y(0.3 * arc);
+        // Into the camera (z towards it in the case's space).
+        let to_cam = dist / s - hold_z;
+        match cfg.launch.open_style.as_str() {
+            "spin" => {
+                // Spins up on its face while held, then flies into the camera.
+                let turn = out * PI * 2.0 + ins * ins * PI * 10.0;
+                rot = rot * Quat::from_rotation_z(turn);
+                pos.z += to_cam * 0.95 * ins * ins;
+                ease(&mut t, Transform::from_translation(pos).with_rotation(rot), 1.0);
+                continue;
+            }
+            "fly" => {
+                pos.z += to_cam * 0.95 * ins * ins;
+                ease(&mut t, Transform::from_translation(pos).with_rotation(rot), 1.0);
+                continue;
+            }
+            "rise" => {
+                pos.y += drop * 1.6 * ins * ins;
+                rot = Quat::from_rotation_x(0.6 * ins) * rot;
+                ease(&mut t, Transform::from_translation(pos).with_rotation(rot), 1.0);
+                continue;
+            }
+            // Turns over to show its other side while held, then on into the drive.
+            "flip" => rot = rot * Quat::from_rotation_y(PI * smooth((p - 0.58) / 0.2)),
+            _ => {}
+        }
         match rig.media_kind {
             MediaKind::Disc => {
                 // Tips flat, label up, and slides down out of view into the drive.
@@ -3501,7 +3555,7 @@ fn update_ui(
     }
     if let Ok(mut t) = q.p2().get_single_mut() {
         let s = match game {
-            Some(g) => {
+            Some(g) if cfg.general.show_details => {
                 let mut parts = Vec::new();
                 if !g.installed {
                     parts.push("Not installed (Enter to install)".to_string());
@@ -3521,7 +3575,7 @@ fn update_ui(
                 }
                 parts.join("  |  ")
             }
-            None => String::new(),
+            _ => String::new(),
         };
         set(&mut t, &s);
     }

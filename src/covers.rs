@@ -1197,6 +1197,12 @@ fn fit_to_aspect(img: &RgbaImage, aspect: f32, max: u32) -> RgbaImage {
         }
         return img.clone();
     }
+    // Moderately off: crop the middle so it fills the whole case (only far-off art is letterboxed).
+    if (0.6..=1.6).contains(&ratio) && !transparent {
+        let (cw, ch) = if ratio > 1.0 { (((ih as f32 * aspect) as u32).clamp(1, iw), ih) } else { (iw, ((iw as f32 / aspect) as u32).clamp(1, ih)) };
+        let cropped = imageops::crop_imm(img, (iw - cw) / 2, (ih - ch) / 2, cw, ch).to_image();
+        return fit_to_aspect(&cropped, aspect, max);
+    }
     let (w, h) = if aspect <= 1.0 { (((max as f32) * aspect) as u32, max) } else { (max, ((max as f32) / aspect) as u32) };
     let (w, h) = (w.max(8), h.max(8));
     let mut out = backdrop(img, w, h, 0.55);
@@ -1707,7 +1713,9 @@ fn steamgriddb_urls(agent: &ureq::Agent, key: &str, req: &CoverRequest) -> Vec<S
             .map(|a| a.iter().take(2).filter_map(|g| g.get("url").and_then(|u| u.as_str()).map(str::to_owned)).collect())
             .unwrap_or_default()
     };
-    let mut out = grids("dimensions=600x900,342x482,660x930&types=static");
+    // Landscape boxes (N64, SNES ...) want the wide grids, not the tall posters.
+    let dims = if req.aspect > 1.0 { "920x430,460x215" } else { "600x900,342x482,660x930" };
+    let mut out = grids(&format!("dimensions={dims}&types=static"));
     if out.is_empty() {
         out = grids("types=static");
     }
@@ -2451,5 +2459,23 @@ mod banner_tests {
         assert_eq!(strip_banner(title, black).height(), 400);
         let busy = scan(None, |x, y| [(x * 7 % 255) as u8, (y * 5 % 255) as u8, 120]);
         assert_eq!(strip_banner(busy, [0x00, 0x50, 0xc8]).height(), 400);
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    #[test]
+    fn moderately_off_art_is_cropped_to_fill() {
+        // A wide SteamGridDB grid on an N64 box front: cropped to the box's shape, no letterbox.
+        let solid = |w, h| RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let out = fit_to_aspect(&solid(920, 430), 1.54, 2048);
+        let a = out.width() as f32 / out.height() as f32;
+        assert!((a - 1.54).abs() < 0.02, "{a}");
+        assert_eq!(out.height(), 430, "cropped, not letterboxed (which would be 2048 wide)");
+        // A tall poster on the same box is too far off: letterboxed to the box's shape.
+        let out = fit_to_aspect(&solid(600, 900), 1.54, 512);
+        assert!((out.width() as f32 / out.height() as f32 - 1.54).abs() < 0.02);
     }
 }

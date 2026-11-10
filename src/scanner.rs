@@ -195,6 +195,8 @@ pub fn scan_steam(cfg: &Config) -> Vec<Game> {
                 "steam",
             );
             g.steam_appid = Some(appid_n);
+            // Install folder (for "Browse local files").
+            g.path = get("installdir").map(|d| apps.join("common").join(d).to_string_lossy().into_owned());
             games.push(g);
         }
     }

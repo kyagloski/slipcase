@@ -58,6 +58,7 @@ enum Act {
     ChooseArt,
     BackgroundImage,
     BrowseLocation,
+    BrowseFiles,
     HideGame,
     RemoveGame,
 }
@@ -82,10 +83,10 @@ enum Kind {
     GameArgs,
     /// Proton build for a Windows program on Linux.
     GameProton,
+    /// Case colour for the selected game (one of `CASE_COLORS`).
+    GameCaseColor,
     /// Environment variables passed to Proton.
     GameProtonOptions,
-    /// Default Proton build (Launching).
-    ProtonDefault,
     /// A hidden game in the library (by id); activating it unhides it.
     HiddenGame(String),
     /// A hidden title no scan has found yet; activating it removes it from the list.
@@ -168,6 +169,21 @@ macro_rules! options {
 }
 
 const HIDDEN_HEADER: &str = "Hidden games";
+/// Case colours a game can be given ("" = the console's own).
+const CASE_COLORS: [(&str, &str); 11] = [
+    ("", "Console default"),
+    ("#141414", "Black"),
+    ("#f0f0f0", "White"),
+    ("#9a9ea6", "Silver"),
+    ("#1f4fd8", "Blue"),
+    ("#c81e1e", "Red"),
+    ("#2e9e3a", "Green"),
+    ("#f2c21b", "Yellow"),
+    ("#7a3cc8", "Purple"),
+    ("#ff7ab8", "Pink"),
+    ("#ffffff59", "Clear"),
+];
+
 /// The cover download settings, a group inside "Cases and discs".
 const SUB_COVERS: &str = "Covers";
 
@@ -216,11 +232,13 @@ fn entries() -> Vec<Entry> {
         Entry { label: "Title", kind: Kind::GameTitle, effect: Effect::View, advanced: false },
         Entry { label: "Platform", kind: Kind::GamePlatform, effect: Effect::Respawn, advanced: true },
         Entry { label: "Favorite", kind: Kind::GameFavorite, effect: Effect::View, advanced: false },
+        Entry { label: "Case colour", kind: Kind::GameCaseColor, effect: Effect::None, advanced: false },
         Entry { label: "Location (Enter to type, empty = detected)", kind: Kind::GameLocation, effect: Effect::None, advanced: true },
         Entry { label: "Browse for location...", kind: Kind::Act(Act::BrowseLocation), effect: Effect::None, advanced: true },
         Entry { label: "Launch arguments", kind: Kind::GameArgs, effect: Effect::None, advanced: true },
-        Entry { label: "Proton version", kind: Kind::GameProton, effect: Effect::None, advanced: false },
+        Entry { label: "Proton version", kind: Kind::GameProton, effect: Effect::None, advanced: true },
         Entry { label: "Proton options (e.g. PROTON_ENABLE_NVAPI=1)", kind: Kind::GameProtonOptions, effect: Effect::None, advanced: true },
+        Entry { label: "Browse local files", kind: Kind::Act(Act::BrowseFiles), effect: Effect::None, advanced: false },
         Entry { label: "Choose art (cover, disc, insert)...", kind: Kind::Act(Act::ChooseArt), effect: Effect::None, advanced: false },
         Entry { label: "Download cover again", kind: Kind::Act(Act::RefetchCover), effect: Effect::None, advanced: true },
         Entry { label: "Hide this game", kind: Kind::Act(Act::HideGame), effect: Effect::None, advanced: false },
@@ -235,15 +253,6 @@ fn entries() -> Vec<Entry> {
             effect: Effect::View,
             advanced: false,
         },
-        Entry {
-            label: "Show as",
-            kind: Kind::Choice {
-                get: |c| c.display.item_style.name().to_string(),
-                set: |c, d| c.display.item_style = cycle_list(&ItemStyle::ALL, c.display.item_style, d),
-            },
-            effect: Effect::Respawn,
-            advanced: false,
-        },
         options!("Sort by", display.sort, ["alphabetical", "recent", "most_played", "platform"], Effect::View),
         toggle!("Only favorites", display.only_favorites, Effect::View),
         toggle!("Loop the list (scroll forever)", display.loop_list, Effect::View),
@@ -251,6 +260,7 @@ fn entries() -> Vec<Entry> {
         num!("Item size", display.item_scale, 0.4, 2.5, 0.05, Effect::View),
         num!("Zoom", display.zoom, 0.45, 4.0, 0.05, Effect::Zoom),
         num!("Selected game distance", display.selected_distance, 15.0, 90.0, 1.0, Effect::None),
+        num!("Open case size", display.open_case_size, 0.3, 1.0, 0.02, Effect::None),
         adv(num!("Spacing", display.spacing_scale, 0.4, 2.5, 0.05, Effect::View)),
         adv(num!("Field of view", display.field_of_view, 15.0, 90.0, 1.0, Effect::None)),
         adv(toggle!("Same size for every case", display.uniform_sizes, Effect::Respawn)),
@@ -263,14 +273,21 @@ fn entries() -> Vec<Entry> {
             Effect::None
         ),
         adv(num!("Highlight width (cm)", display.highlight_width, 0.04, 1.0, 0.02, Effect::Respawn)),
-        adv(toggle!("Lean away from the mouse", display.hover_tilt, Effect::None)),
-        adv(num!("Lean away strength", display.hover_tilt_strength, 0.0, 3.0, 0.1, Effect::None)),
         toggle!("Show key hints", general.show_hints, Effect::None),
-        adv(toggle!("Show description", general.show_info, Effect::None)),
+        toggle!("Show description", general.show_info, Effect::None),
+        toggle!("Show platform, year and genres", general.show_details, Effect::None),
         header!("Cases and discs"),
+        Entry {
+            label: "Style",
+            kind: Kind::Choice {
+                get: |c| c.display.item_style.name().to_string(),
+                set: |c, d| c.display.item_style = cycle_list(&ItemStyle::ALL, c.display.item_style, d),
+            },
+            effect: Effect::Respawn,
+            advanced: false,
+        },
         options!("Spines", display.spine_style, ["auto", "generated", "simple"], Effect::Respawn),
         toggle!("Console banners", display.platform_banners, Effect::Respawn),
-        num!("Open case size", display.open_case_size, 0.3, 1.0, 0.02, Effect::None),
         adv(options!("Case corners", display.case_corners, ["real", "custom"], Effect::Respawn)),
         adv(num!("Custom corner radius (cm)", display.case_corner_radius, 0.0, 1.5, 0.05, Effect::Respawn)),
         adv(toggle!("Thumb groove", display.case_finger_notch, Effect::Respawn)),
@@ -321,13 +338,17 @@ fn entries() -> Vec<Entry> {
         options!("Flash colour", launch.flash_color, ["#ffffff", "#000000", "#9fe8ff", "#ffd27a", "#b7ffb0"], Effect::None),
         adv(toggle!("Other games fall back", launch.recede, Effect::None)),
         toggle!("Open the case and take the game out", launch.open_case, Effect::None),
+        options!("Taking the game out", launch.open_style, ["drive", "spin", "flip", "fly", "rise"], Effect::None),
         adv(num!("Open-case length (s)", launch.open_duration, 1.0, 6.0, 0.1, Effect::None)),
         adv(toggle!("Minimize after launching", general.minimize_on_launch, Effect::None)),
-        Entry { label: "Proton for Windows programs", kind: Kind::ProtonDefault, effect: Effect::None, advanced: true },
         toggle!("Close after launching", general.close_on_launch, Effect::None),
         header!("Motion"),
         num!("Speed", animation.speed, 0.2, 4.0, 0.1, Effect::None),
         options!("Selection motion", animation.motion, ["direct", "flip", "tumble", "roll", "dip", "swoop"], Effect::None),
+        num!("Mouse highlight bounce", animation.hover_bounce, 0.0, 3.0, 0.1, Effect::None),
+        adv(num!("Dragged games come back after (s)", animation.toss_respawn, 0.0, 60.0, 1.0, Effect::None)),
+        adv(toggle!("Lean away from the mouse", display.hover_tilt, Effect::None)),
+        adv(num!("Lean away strength", display.hover_tilt_strength, 0.0, 3.0, 0.1, Effect::None)),
         adv(num!("Scroll speed", animation.scroll_speed, 0.2, 4.0, 0.1, Effect::None)),
         adv(num!("Idle sway", animation.idle_sway, 0.0, 3.0, 0.1, Effect::None)),
         adv(num!("Spin selected (deg/s)", animation.spin, 0.0, 180.0, 5.0, Effect::None)),
@@ -650,6 +671,9 @@ fn load_menu_fonts(fonts: &mut Assets<Font>) -> MenuFonts {
     for (r, b) in MENU_FONT_PAIRS {
         if let (Some(rf), Some(bf)) = (load(r), load(b)) {
             let measure = std::fs::read(r).ok().and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok()).map(std::sync::Arc::new);
+            // The bold face also goes in place of Bevy's built-in font (a small monospace subset without symbols
+            // such as the trademark sign), which the titles and info on screen use.
+            fonts.insert(&Handle::<Font>::default(), bf.clone());
             return MenuFonts { regular: fonts.add(rf), bold: fonts.add(bf), measure };
         }
     }
@@ -1281,6 +1305,10 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
             })
             .unwrap_or_default(),
         Kind::GameArgs => game.map(|g| if g.launch_args.is_empty() { "(none)".to_string() } else { crate::render::truncate(&g.launch_args, 26) }).unwrap_or_default(),
+        Kind::GameCaseColor => game
+            .map(|g| CASE_COLORS.iter().find(|(h, _)| *h == g.case_color).map_or_else(|| g.case_color.clone(), |(_, n)| n.to_string()))
+            .unwrap_or_default(),
+        Kind::GameProton | Kind::GameProtonOptions if !menu.proton_rows => "Not needed".into(),
         Kind::GameProton => game
             .map(|g| match g.proton.as_str() {
                 "" => format!("Default ({})", crate::proton::resolve("", &cfg.launch.proton).map_or("none found".into(), |t| t.name)),
@@ -1290,13 +1318,6 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
             .map(|s| crate::render::truncate(&s, 30))
             .unwrap_or_default(),
         Kind::GameProtonOptions => game.map(|g| if g.proton_options.is_empty() { "(none)".to_string() } else { crate::render::truncate(&g.proton_options, 26) }).unwrap_or_default(),
-        Kind::ProtonDefault => crate::render::truncate(
-            &match crate::proton::tools().into_iter().find(|t| t.name == cfg.launch.proton) {
-                Some(t) => t.name,
-                None => format!("Auto ({})", crate::proton::resolve("", "").map_or("none found".into(), |t| t.name)),
-            },
-            30,
-        ),
         Kind::HiddenGame(_) => "Unhide".into(),
         Kind::HiddenTitle(_) => "Unhide (not found yet)".into(),
         Kind::Note(_) => String::new(),
@@ -1304,9 +1325,14 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
     }
 }
 
+/// A per-game Proton row while the selected game does not run through Proton (greyed out).
+fn proton_unused(e: &Entry, menu: &Menu) -> bool {
+    matches!(e.kind, Kind::GameProton | Kind::GameProtonOptions) && !menu.proton_rows
+}
+
 /// Entries changed with < and > (numbers have a slider instead).
 fn has_arrows(e: &Entry) -> bool {
-    matches!(e.kind, Kind::Choice { .. } | Kind::RomPlatform | Kind::GamePlatform | Kind::GameProton | Kind::ProtonDefault)
+    matches!(e.kind, Kind::Choice { .. } | Kind::RomPlatform | Kind::GamePlatform | Kind::GameProton | Kind::GameCaseColor)
 }
 
 /// Text in the label column: hidden games show their title.
@@ -1405,7 +1431,7 @@ fn draw_menu(
         let style = &mut t.sections[0].style;
         style.color = if header {
             ACCENT
-        } else if advanced_row || matches!(e.kind, Kind::Note(_)) {
+        } else if advanced_row || matches!(e.kind, Kind::Note(_)) || proton_unused(e, &menu) {
             DIM
         } else {
             TEXT
@@ -1422,12 +1448,18 @@ fn draw_menu(
         let Some(e) = menu.entries.get(i) else { continue };
         let s = value_text(e, data, &menu, game);
         // Colour settings show their value in that colour (lifted enough to read).
-        let color = match &e.kind {
-            Kind::Color(_) => {
-                let c = crate::config::parse_hex(&s);
+        let hex = match &e.kind {
+            Kind::Color(_) => Some(s.as_str()),
+            Kind::GameCaseColor => game.map(|g| g.case_color.as_str()).filter(|h| !h.is_empty()),
+            _ => None,
+        };
+        let color = match hex {
+            Some(h) => {
+                let c = crate::config::parse_hex(&h[..h.len().min(7)]);
                 let lift = (0.55 / c[0].max(c[1]).max(c[2]).max(0.05)).max(1.0);
                 Color::srgb((c[0] * lift).min(1.0), (c[1] * lift).min(1.0), (c[2] * lift).min(1.0))
             }
+            _ if proton_unused(e, &menu) => DIM,
             _ => ACCENT,
         };
         if t.sections[0].style.color != color {
@@ -1464,7 +1496,7 @@ fn draw_menu(
         }
     }
     for (a, interaction, mut style, mut bg) in &mut arrows {
-        let show = menu.entries.get(menu.scroll + a.0).is_some_and(has_arrows);
+        let show = menu.entries.get(menu.scroll + a.0).is_some_and(|e| has_arrows(e) && !proton_unused(e, &menu));
         let d = if show { Display::Flex } else { Display::None };
         if style.display != d {
             style.display = d;
@@ -1664,6 +1696,10 @@ fn spawn_picker(menu: &mut Menu, f: impl FnOnce() -> Option<Picked> + Send + 'st
 /// Changes the selected entry: `d` = +1 / -1 for next / previous, 0 for "activate".
 fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
     let i = menu.index;
+    if proton_unused(&menu.entries[i], menu) {
+        ctx.toast.show("This game does not run through Proton");
+        return;
+    }
     let effect = menu.entries[i].effect;
     let game_id = ctx.view.selected_game(&ctx.lib).map(|g| g.id.clone());
     let dir = if d == 0 { 1 } else { d };
@@ -1743,6 +1779,22 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 menu.editing = ctx.view.selected_game(&ctx.lib).map(|g| crate::textedit::TextEdit::new("Proton options (KEY=value ...)", &g.proton_options));
             }
         }
+        Kind::GameCaseColor => {
+            if d == 0 {
+                if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find(id)) {
+                    let original = g.case_color.clone();
+                    let hsv = pick_rgb_to_hsv(crate::config::parse_hex(&original[..original.len().min(7)]));
+                    let alpha = original.get(7..9).and_then(|a| u8::from_str_radix(a, 16).ok()).map_or(1.0, |a| a as f32 / 255.0);
+                    menu.color = Some(ColorPick { target: PickTarget::Game(g.id.clone()), title: "Case colour", hsv, original, was_adaptive: false, drag: 0, moved: false, alpha });
+                }
+            } else if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
+                let i = CASE_COLORS.iter().position(|(h, _)| *h == g.case_color).unwrap_or(0) as i32;
+                g.case_color = CASE_COLORS[(i + dir).rem_euclid(CASE_COLORS.len() as i32) as usize].0.to_string();
+                ctx.lib.revision += 1;
+                ctx.persist.mark_lib();
+                ctx.view.respawn = true;
+            }
+        }
         Kind::GameProton => {
             // Default, each installed build, then Off.
             let mut opts: Vec<String> = vec![String::new()];
@@ -1753,13 +1805,6 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 g.proton = opts[(i + dir).rem_euclid(opts.len() as i32) as usize].clone();
                 ctx.persist.mark_lib();
             }
-        }
-        Kind::ProtonDefault => {
-            let mut opts: Vec<String> = vec![String::new()];
-            opts.extend(crate::proton::tools().into_iter().map(|t| t.name));
-            let i = opts.iter().position(|o| *o == ctx.cfg.launch.proton).unwrap_or(0) as i32;
-            ctx.cfg.launch.proton = opts[(i + dir).rem_euclid(opts.len() as i32) as usize].clone();
-            apply(ctx, effect);
         }
         Kind::GameFavorite => {
             if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
@@ -1854,6 +1899,16 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
             Act::BrowseLocation => {
                 if let Some(id) = game_id {
                     spawn_picker(menu, move || rfd::FileDialog::new().set_title("Game location (program, ROM or disc image)").pick_file().map(|p| Picked::Location(id, p)))
+                }
+            }
+            Act::BrowseFiles => {
+                match ctx.view.selected_game(&ctx.lib).and_then(|g| g.folder()) {
+                    Some(dir) => {
+                        if crate::library::open_uri(&dir.to_string_lossy()).is_err() {
+                            ctx.toast.show("Could not open the file manager");
+                        }
+                    }
+                    None => ctx.toast.show("No local files found for this game"),
                 }
             }
             Act::BackgroundImage => spawn_picker(menu, || {
@@ -2319,8 +2374,8 @@ fn reset_settings(ctx: &mut Ctx) {
 fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
     let mut all = entries();
     all.retain(|e| match e.kind {
-        Kind::GameProton | Kind::GameProtonOptions => menu.proton_rows,
-        Kind::ProtonDefault => cfg!(target_os = "linux"),
+        // Listed for every game; greyed out (see `proton_unused`) when it does not run through Proton.
+        Kind::GameProton | Kind::GameProtonOptions => cfg!(target_os = "linux"),
         Kind::Act(Act::RemoveGame) => menu.remove_row,
         _ => true,
     });
@@ -2440,13 +2495,23 @@ fn menu_pickers(mut menu: ResMut<Menu>, mut ctx: Ctx) {
 /// A colour being picked: which setting, the colour as hue / saturation / value, and what to
 /// go back to on Cancel. The setting changes live, so the background shows the colour at once.
 struct ColorPick {
-    target: fn(&mut ConfigData) -> &mut String,
+    target: PickTarget,
     title: &'static str,
     hsv: Vec3,
     original: String,
     was_adaptive: bool,
     /// Dragging in the square (1) or along the hue bar (2).
     drag: u8,
+    /// Changed since the game's case was last rebuilt.
+    moved: bool,
+    /// Opacity (case colours only; config colours are always opaque).
+    alpha: f32,
+}
+
+/// What the picker sets: a config colour, or a game's case colour.
+enum PickTarget {
+    Cfg(fn(&mut ConfigData) -> &mut String),
+    Game(String),
 }
 
 #[derive(Resource)]
@@ -2466,6 +2531,10 @@ struct PickDot;
 struct PickHue;
 #[derive(Component)]
 struct PickHueMark;
+#[derive(Component)]
+struct PickAlpha;
+#[derive(Component)]
+struct PickAlphaMark;
 #[derive(Component)]
 struct PickPreview;
 #[derive(Component)]
@@ -2514,6 +2583,16 @@ fn pick_rgb_to_hsv(c: [f32; 3]) -> Vec3 {
     Vec3::new(h, if mx == 0.0 { 0.0 } else { d / mx }, mx)
 }
 
+/// The picked colour as stored: a case colour carries its opacity as a fourth byte.
+fn pick_out(p: &ColorPick) -> String {
+    let hex = pick_hex(p.hsv);
+    if matches!(p.target, PickTarget::Game(_)) && p.alpha < 0.995 {
+        format!("{hex}{:02x}", (p.alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+    } else {
+        hex
+    }
+}
+
 fn pick_hex(hsv: Vec3) -> String {
     let [r, g, b] = pick_hsv_to_rgb(hsv.x, hsv.y, hsv.z);
     let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -2526,7 +2605,7 @@ fn open_color_pick(menu: &mut Menu, ctx: &mut Ctx, title: &'static str, f: fn(&m
     let original = f(&mut ctx.cfg.data).clone();
     let was_adaptive = ctx.cfg.background.adaptive;
     ctx.cfg.data.background.adaptive = false;
-    menu.color = Some(ColorPick { target: f, title, hsv: pick_rgb_to_hsv(crate::config::parse_hex(&original)), original, was_adaptive, drag: 0 });
+    menu.color = Some(ColorPick { target: PickTarget::Cfg(f), title, hsv: pick_rgb_to_hsv(crate::config::parse_hex(&original)), original, was_adaptive, drag: 0, moved: false, alpha: 1.0 });
 }
 
 fn spawn_color_picker(mut commands: Commands, fonts: Res<MenuFonts>, mut images: ResMut<Assets<Image>>) {
@@ -2551,12 +2630,15 @@ fn spawn_color_picker(mut commands: Commands, fonts: Res<MenuFonts>, mut images:
                     position_type: PositionType::Absolute,
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),
-                    justify_content: JustifyContent::Center,
+                    // Centred over the settings panel on the right.
+                    justify_content: JustifyContent::End,
                     align_items: AlignItems::Center,
+                    padding: UiRect::right(Val::Px((PANEL_W - PICK_W - 28.0) * 0.5)),
                     display: Display::None,
                     ..default()
                 },
-                background_color: BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.2)),
+                // Clear, but it takes the clicks outside the box (which close the picker).
+                background_color: BackgroundColor(Color::NONE),
                 z_index: ZIndex::Global(65),
                 focus_policy: bevy::ui::FocusPolicy::Block,
                 ..default()
@@ -2565,20 +2647,25 @@ fn spawn_color_picker(mut commands: Commands, fonts: Res<MenuFonts>, mut images:
             Interaction::default(),
         ))
         .with_children(|o| {
-            o.spawn(NodeBundle {
-                style: Style {
-                    width: Val::Px(PICK_W + 28.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(10.0),
-                    border: UiRect::all(Val::Px(1.0)),
+            o.spawn((
+                NodeBundle {
+                    style: Style {
+                        width: Val::Px(PICK_W + 28.0),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(Val::Px(14.0)),
+                        row_gap: Val::Px(10.0),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    background_color: BackgroundColor(Color::srgb(0.07, 0.08, 0.11)),
+                    border_color: BorderColor(Color::srgba(0.55, 0.78, 1.0, 0.5)),
+                    border_radius: BorderRadius::all(Val::Px(10.0)),
+                    // Blocks, so a click on the box is not a click on the layer behind it.
+                    focus_policy: bevy::ui::FocusPolicy::Block,
                     ..default()
                 },
-                background_color: BackgroundColor(Color::srgb(0.07, 0.08, 0.11)),
-                border_color: BorderColor(Color::srgba(0.55, 0.78, 1.0, 0.5)),
-                border_radius: BorderRadius::all(Val::Px(10.0)),
-                ..default()
-            })
+                Interaction::default(),
+            ))
             .with_children(|d| {
                 d.spawn((txt(&f.bold, 15.0, ACCENT, ""), PickTitle));
                 // Saturation (across) and brightness (up) for the current hue.
@@ -2628,6 +2715,32 @@ fn spawn_color_picker(mut commands: Commands, fonts: Res<MenuFonts>, mut images:
                             ..default()
                         },
                         PickHueMark,
+                    ));
+                });
+                // Opacity (case colours only): see-through at the left, solid at the right.
+                d.spawn((
+                    NodeBundle {
+                        style: Style { width: Val::Px(PICK_W), height: Val::Px(16.0), border: UiRect::all(Val::Px(1.0)), display: Display::None, ..default() },
+                        background_color: BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                        border_color: BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                        focus_policy: bevy::ui::FocusPolicy::Block,
+                        ..default()
+                    },
+                    PickAlpha,
+                    Interaction::default(),
+                    bevy::ui::RelativeCursorPosition::default(),
+                ))
+                .with_children(|h| {
+                    h.spawn((
+                        NodeBundle {
+                            style: Style { position_type: PositionType::Absolute, top: Val::Px(-4.0), width: Val::Px(6.0), height: Val::Px(22.0), border: UiRect::all(Val::Px(2.0)), ..default() },
+                            border_color: BorderColor(Color::WHITE),
+                            border_radius: BorderRadius::all(Val::Px(3.0)),
+                            focus_policy: bevy::ui::FocusPolicy::Pass,
+                            ..default()
+                        },
+                        PickAlphaMark,
                     ));
                 });
                 d.spawn(NodeBundle { style: Style { align_items: AlignItems::Center, column_gap: Val::Px(10.0), ..default() }, ..default() }).with_children(|row| {
@@ -2689,21 +2802,27 @@ fn color_pick_input(
     mut cfg: ResMut<Config>,
     mut persist: ResMut<Persist>,
     mut toast: ResMut<Toast>,
+    mut lib: ResMut<Library>,
+    mut view: ResMut<ViewState>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     square: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), (With<PickSquare>, Without<PickHue>)>,
     hue: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), (With<PickHue>, Without<PickSquare>)>,
+    alpha: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<PickAlpha>>,
+    layer: Query<&Interaction, With<PickLayer>>,
     presets: Query<(&PickPreset, &Interaction)>,
     buttons: Query<(&PickBtn, &Interaction)>,
 ) {
     let Some(pick) = menu.color.as_mut() else { return };
-    let before = pick.hsv;
+    let before = (pick.hsv, pick.alpha);
     let clicked = mouse.just_pressed(MouseButton::Left);
     if clicked {
         if square.iter().any(|(i, _)| *i == Interaction::Pressed) {
             pick.drag = 1;
         } else if hue.iter().any(|(i, _)| *i == Interaction::Pressed) {
             pick.drag = 2;
+        } else if alpha.iter().any(|(i, _)| *i == Interaction::Pressed) {
+            pick.drag = 3;
         } else if let Some((p, _)) = presets.iter().find(|(_, i)| **i == Interaction::Pressed) {
             pick.hsv = pick_rgb_to_hsv(crate::config::parse_hex(p.0));
         }
@@ -2723,14 +2842,24 @@ fn color_pick_input(
                 pick.hsv.x = n.x.clamp(0.0, 0.9999);
             }
         }
+        3 => {
+            if let Some(n) = alpha.get_single().ok().and_then(|(_, r)| r.normalized) {
+                pick.alpha = n.x.clamp(0.0, 1.0);
+            }
+        }
         _ => {}
     }
-    if pick.hsv != before {
-        *(pick.target)(&mut cfg.data) = pick_hex(pick.hsv);
-        persist.mark_cfg();
+    pick.moved |= (pick.hsv, pick.alpha) != before;
+    // A game's case is rebuilt to show it, so only once a click or drag is done (not every frame).
+    if pick.moved && (matches!(pick.target, PickTarget::Cfg(_)) || pick.drag == 0) {
+        pick.moved = false;
+        set_pick(&pick.target, pick_out(pick), &mut cfg, &mut lib, &mut view, &mut persist);
     }
     let button = if clicked { buttons.iter().find(|(_, i)| **i == Interaction::Pressed).map(|(b, _)| b.0) } else { None };
-    let keep = button == Some(true) || keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
+    // A click (left or right) outside the box lands on the clear layer: keep the colour and close,
+    // like the art chooser.
+    let outside = mouse.any_just_pressed([MouseButton::Left, MouseButton::Right]) && layer.iter().any(|i| *i != Interaction::None);
+    let keep = outside || button == Some(true) || keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
     let cancel = button == Some(false) || keys.just_pressed(KeyCode::Escape);
     if keep {
         let pick = menu.color.take().unwrap();
@@ -2740,9 +2869,26 @@ fn color_pick_input(
         persist.mark_cfg();
     } else if cancel {
         let pick = menu.color.take().unwrap();
-        *(pick.target)(&mut cfg.data) = pick.original;
+        set_pick(&pick.target, pick.original, &mut cfg, &mut lib, &mut view, &mut persist);
         cfg.data.background.adaptive = pick.was_adaptive;
         persist.mark_cfg();
+    }
+}
+
+fn set_pick(target: &PickTarget, hex: String, cfg: &mut Config, lib: &mut Library, view: &mut ViewState, persist: &mut Persist) {
+    match target {
+        PickTarget::Cfg(f) => {
+            *f(&mut cfg.data) = hex;
+            persist.mark_cfg();
+        }
+        PickTarget::Game(id) => {
+            if let Some(g) = lib.find_mut(id).filter(|g| g.case_color != hex) {
+                g.case_color = hex;
+                lib.revision += 1;
+                persist.mark_lib();
+                view.respawn = true;
+            }
+        }
     }
 }
 
@@ -2755,6 +2901,7 @@ fn draw_color_picker(
     mut layer: Query<&mut Style, (With<PickLayer>, Without<PickDot>, Without<PickHueMark>)>,
     mut dot: Query<&mut Style, (With<PickDot>, Without<PickLayer>, Without<PickHueMark>)>,
     mut mark: Query<&mut Style, (With<PickHueMark>, Without<PickLayer>, Without<PickDot>)>,
+    mut alpha_bar: Query<(&mut Style, Has<PickAlpha>), (Or<(With<PickAlpha>, With<PickAlphaMark>)>, Without<PickLayer>, Without<PickDot>, Without<PickHueMark>)>,
     mut preview: Query<&mut BackgroundColor, (With<PickPreview>, Without<PickBtn>)>,
     mut texts: Query<(&mut Text, Option<&PickTitle>, Option<&PickHex>, Option<&PickNote>)>,
     mut buttons: Query<(&Interaction, &mut BackgroundColor), (With<PickBtn>, Without<PickPreview>)>,
@@ -2791,12 +2938,29 @@ fn draw_color_picker(
     for mut s in &mut mark {
         s.left = Val::Px(hsv.x * PICK_W - 3.0);
     }
+    let case = matches!(pick.target, PickTarget::Game(_));
+    for (mut s, bar) in &mut alpha_bar {
+        if bar {
+            let d = if case { Display::Flex } else { Display::None };
+            if s.display != d {
+                s.display = d;
+            }
+        } else {
+            s.left = Val::Px(pick.alpha * PICK_W - 4.0);
+        }
+    }
     let [r, g, b] = pick_hsv_to_rgb(hsv.x, hsv.y, hsv.z);
     for mut c in &mut preview {
-        c.0 = Color::srgb(r, g, b);
+        c.0 = Color::srgba(r, g, b, if case { pick.alpha } else { 1.0 });
     }
-    let hex = pick_hex(hsv);
-    let note = if pick.was_adaptive { "\"Colours follow the cover\" turns off so these colours show." } else { "" };
+    let hex = pick_out(pick);
+    let note = if pick.was_adaptive {
+        "\"Colours follow the cover\" turns off so these colours show."
+    } else if case {
+        "Lower bar: opacity."
+    } else {
+        ""
+    };
     for (mut t, title, hx, nt) in &mut texts {
         let want = if title.is_some() {
             pick.title

@@ -19,6 +19,7 @@ mod scanner;
 mod settings;
 mod textedit;
 mod toss;
+mod record;
 
 use bevy::prelude::*;
 use bevy::window::{CompositeAlphaMode, PresentMode, WindowMode, WindowPosition};
@@ -188,6 +189,7 @@ fn main() {
         .add_plugins((app::LauncherPlugin, egg::EggPlugin, toss::TossPlugin))
         .add_plugins(settings::SettingsPlugin)
         .insert_resource(if args.iter().any(|a| a == "--settings") { settings::Menu::opened() } else { settings::Menu::default() })
+        .add_plugins(record::RecordPlugin)
         .run();
 }
 

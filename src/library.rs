@@ -70,6 +70,9 @@ pub struct Game {
     /// Hidden from the launcher (listed under Settings > Hidden games).
     #[serde(default)]
     pub hidden: bool,
+    /// Set by the user: case plastic colour (hex, "" = the console's).
+    #[serde(default)]
+    pub case_color: String,
     /// Cartridge plastic colour (sRGB + alpha), measured from a photo of the cartridge.
     #[serde(default)]
     pub cart_color: Option<[f32; 4]>,
@@ -118,6 +121,7 @@ impl Game {
             proton: String::new(),
             proton_options: String::new(),
             hidden: false,
+            case_color: String::new(),
             cart_color: None,
             media_art: None,
             insert_art: None,
@@ -137,6 +141,18 @@ impl Game {
             Launch::Command { program, .. } => program.clone(),
             Launch::Rom { path } => path.clone(),
         }
+    }
+
+    /// The folder the game's files are in (its location's, else its install folder), if it exists.
+    pub fn folder(&self) -> Option<PathBuf> {
+        let loc = self.location();
+        let dir = [Some(loc.trim().trim_matches('"')), self.path.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .find_map(|p| if p.is_dir() { Some(p) } else { p.parent().filter(|d| d.is_dir()).map(Path::to_path_buf) });
+        dir
     }
 
     /// What launching does, with the user's location applied.
@@ -225,6 +241,9 @@ impl Library {
             g.custom_location = existing.custom_location.clone();
             g.launch_args = existing.launch_args.clone();
             g.hidden = existing.hidden;
+            g.case_color = existing.case_color.clone();
+            g.proton = existing.proton.clone();
+            g.proton_options = existing.proton_options.clone();
             g.cart_color = existing.cart_color;
             g.media_art = existing.media_art.clone();
             g.insert_art = existing.insert_art.clone();
@@ -378,7 +397,7 @@ pub fn game_from_path(path: &Path, title: Option<String>, platform: Option<Platf
 // Launching
 // ------------------------------------------------------------------------------------------------
 
-fn open_uri(uri: &str) -> std::io::Result<()> {
+pub fn open_uri(uri: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd").args(["/C", "start", "", uri]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|_| ())
@@ -518,5 +537,31 @@ mod prune_tests {
         let left: Vec<&str> = lib.games.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(left, vec!["here", "drive", "steam"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn folder_is_where_the_files_are() {
+        let root = std::env::temp_dir().join(format!("slipcase-folder-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let rom = Game::new("r", "r", Platform::Gba, Launch::Rom { path: root.join("x.gba").to_string_lossy().into() }, "rom");
+        assert_eq!(rom.folder(), Some(root.clone()));
+        let mut steam = Game::new("s", "s", Platform::Pc, Launch::Uri { uri: "steam://rungameid/1".into() }, "steam");
+        assert_eq!(steam.folder(), None);
+        steam.path = Some(root.to_string_lossy().into());
+        assert_eq!(steam.folder(), Some(root.clone()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_keeps_user_settings() {
+        let steam = || Game::new("s", "s", Platform::Pc, Launch::Uri { uri: "steam://rungameid/1".into() }, "steam");
+        let mut lib = Library { games: vec![steam()], revision: 1 };
+        let g = &mut lib.games[0];
+        g.case_color = "#c81e1e80".into();
+        g.proton = "GE-Proton9".into();
+        g.proton_options = "DXVK_HUD=fps".into();
+        lib.merge_scan(vec![steam()]);
+        let g = &lib.games[0];
+        assert_eq!((g.case_color.as_str(), g.proton.as_str(), g.proton_options.as_str()), ("#c81e1e80", "GE-Proton9", "DXVK_HUD=fps"));
     }
 }

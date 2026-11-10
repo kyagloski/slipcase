@@ -221,7 +221,9 @@ impl Platform {
             Platform::Pc => Geometry::case(dvd, Media::Disc { diameter: 12.0 }),
             Platform::Gb | Platform::Gbc => Geometry::case((12.5, 12.5, 2.4), Media::Cart { w: 5.7, h: 6.5, d: 0.8 }),
             Platform::Gba => Geometry::case((12.0, 12.0, 2.4), Media::Cart { w: 5.7, h: 3.5, d: 0.8 }),
-            Platform::Nds | Platform::N3ds => Geometry::case((13.1, 13.7, 1.4), Media::Cart { w: 3.5, h: 3.3, d: 0.38 }),
+            // Wider than tall, so the art beside the side banner has the scans' shape (about 1.12).
+            Platform::Nds => Geometry::case((15.8, 12.5, 1.4), Media::Cart { w: 3.5, h: 3.3, d: 0.38 }),
+            Platform::N3ds => Geometry::case((13.1, 13.7, 1.4), Media::Cart { w: 3.5, h: 3.3, d: 0.38 }),
             Platform::Nes => Geometry::case((13.0, 17.5, 4.2), Media::Cart { w: 12.0, h: 13.3, d: 2.0 }),
             Platform::Snes => Geometry::case((18.4, 13.0, 3.8), Media::Cart { w: 12.0, h: 10.4, d: 2.0 }),
             Platform::N64 => Geometry::case((19.0, 13.4, 4.8), Media::Cart { w: 11.6, h: 7.6, d: 1.9 }),

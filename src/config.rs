@@ -241,6 +241,8 @@ pub struct General {
     pub overlay_alpha: String,
     pub show_hints: bool,
     pub show_info: bool,
+    /// The line under the title: platform, year, genres, plays.
+    pub show_details: bool,
     pub bloom: bool,
     /// Multiplies all scene lighting.
     pub brightness: f32,
@@ -276,6 +278,7 @@ impl Default for General {
             last_game: String::new(),
             show_hints: true,
             show_info: true,
+            show_details: true,
             bloom: true,
             brightness: 1.0,
             ui_scale: 1.0,
@@ -451,6 +454,9 @@ pub struct Launch {
     /// Cases open, and the disc or cartridge is taken out before the game starts
     /// (replaces `style` for the case styles).
     pub open_case: bool,
+    /// How the game leaves the open case: "drive" (down into the console), "spin", "flip",
+    /// "fly" (into the camera), "rise" (up out of view).
+    pub open_style: String,
     /// Seconds for the open-the-case animation.
     pub open_duration: f32,
     /// Proton build for Windows programs on Linux (folder name; empty = the newest installed).
@@ -466,6 +472,7 @@ impl Default for Launch {
             flash_color: "#ffffff".into(),
             recede: true,
             open_case: true,
+            open_style: "drive".into(),
             open_duration: 2.2,
             proton: String::new(),
         }
@@ -487,11 +494,15 @@ pub struct Animation {
     /// (turn round), "tumble" (end over end), "roll" (bank), "dip" (back, then forward),
     /// "swoop" (out towards you, then back).
     pub motion: String,
+    /// How far the game under the mouse lifts out (1 = as designed).
+    pub hover_bounce: f32,
+    /// Seconds before a game dropped off the screen (Ctrl / Shift + drag) is back in its place.
+    pub toss_respawn: f32,
 }
 
 impl Default for Animation {
     fn default() -> Self {
-        Self { speed: 1.25, scroll_speed: 1.2, idle_sway: 1.0, spin: 0.0, motion: "direct".into() }
+        Self { speed: 1.25, scroll_speed: 1.2, idle_sway: 1.0, spin: 0.0, motion: "direct".into(), hover_bounce: 1.0, toss_respawn: 10.0 }
     }
 }
 
@@ -876,7 +887,7 @@ impl Default for Keys {
             quit: v(&["Q", "Escape"]),
             flip: v(&["F"]),
             turn_left: v(&["Z"]),
-            turn_right: v(&["C"]),
+            turn_right: v(&["C", "R"]),
             settings: v(&["M", "F1"]),
             open: v(&["Space"]),
             close: v(&["Backspace"]),
@@ -990,6 +1001,10 @@ impl Config {
                     }
                     if data.keys.next_platform == ["E", "PageDown"] {
                         data.keys.next_platform = v(&["PageDown", "]"]);
+                    }
+                    // R rotates the game too.
+                    if data.keys.turn_right == ["C"] {
+                        data.keys.turn_right = v(&["C", "R"]);
                     }
                     Config { data }
                 }
@@ -1108,6 +1123,7 @@ pub fn parse_key(name: &str) -> Option<KeyCode> {
         "UP" => KeyCode::ArrowUp,
         "DOWN" => KeyCode::ArrowDown,
         "ENTER" | "RETURN" => KeyCode::Enter,
+        "CTRL" | "CONTROL" => KeyCode::ControlLeft,
         "SPACE" => KeyCode::Space,
         "TAB" => KeyCode::Tab,
         "ESCAPE" | "ESC" => KeyCode::Escape,

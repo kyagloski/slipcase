@@ -458,7 +458,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // vignette
     let v = length((in.uv - vec2<f32>(0.5)) * vec2<f32>(1.0, 0.8));
     col *= 1.0 - smoothstep(0.35, 0.95, v) * 0.55;
-    // dither to avoid banding in dark gradients
-    col += (hash21(in.uv * 1000.0 + p.time) - 0.5) / 255.0;
+    // dither to avoid banding in dark gradients (a fixed pattern: one that changes every frame
+    // makes recordings of the screen shimmer and compress badly, and looks no different)
+    col += (hash21(in.uv * 1000.0) - 0.5) / 255.0;
     return vec4<f32>(col, 1.0);
 }

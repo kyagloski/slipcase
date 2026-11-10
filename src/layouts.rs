@@ -180,7 +180,7 @@ pub fn pose(c: &LayoutCtx) -> Pose {
             let y = -(at - packed_focus(c.prefix, c.focus, c.period));
             // Lying flat, spine (local -X) facing the camera, top of the case to the left.
             let flat = Quat::from_rotation_y(90f32.to_radians()) * Quat::from_rotation_x(-90f32.to_radians());
-            let in_tower = Vec3::new(p.center_gap * 0.5 * sp, y, -c.dims.x * 0.5 * s);
+            let in_tower = Vec3::new(p.center_gap * 0.8 * sp, y, -c.dims.x * 0.5 * s);
             let out_pos = Vec3::new(-p.center_gap * 0.5 * sp, 0.0, p.depth);
             let upright = Quat::from_rotation_y(p.angle.to_radians());
             out.pos = in_tower.lerp(out_pos, sel);

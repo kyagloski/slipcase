@@ -1,8 +1,8 @@
 //! Picking a game up: Ctrl or Shift + left drag on a game takes it out of the display as a
 //! real object. It hangs from where it was grabbed and swings as it is pulled about, and
 //! knocks the games around it, which wobble and settle back into place (the display keeps
-//! working meanwhile). Let go of the mouse with the key still held and it floats where it is;
-//! let go of the key and it drops into the void, sliding back into its place 10 s later.
+//! working meanwhile). Let go of the key and it drops into the void; once it is off the screen
+//! it is gone, and slides back into its place later ("Dragged games come back after").
 
 use std::collections::HashMap;
 
@@ -16,9 +16,10 @@ use crate::render::Item;
 
 /// Gravity in cm/s², as in the easter egg.
 const GRAVITY: f32 = -650.0;
-/// Seconds a dropped game falls before it is gone, and gone before it comes back.
-const FALL_TIME: f32 = 2.5;
-const AWAY_TIME: f32 = 10.0;
+/// Seconds a dropped game keeps knocking into others before it falls through them (so one
+/// resting on a stack still leaves), and the most it may fall before it is taken away.
+const SOLID_TIME: f32 = 4.0;
+const MAX_FALL: f32 = 30.0;
 /// Seconds the slide back into place takes.
 pub const RETURN_TIME: f32 = 0.8;
 /// Neighbours: spring back to their place (1/s²) and damping (1/s).
@@ -33,7 +34,7 @@ const HELD_IN_PLACE: Group = Group::GROUP_2;
 enum State {
     /// On the end of the cursor.
     Held,
-    /// Let go of with the key still down: drifts to a stop where it is.
+    /// Let go of with the key still down: falls, but stays until the key is let go.
     Floating,
     /// Key let go: dropping out of sight (since when).
     Falling(f32),
@@ -72,6 +73,8 @@ pub struct Toss {
     /// The left press this frame picked a game up (the display ignores it).
     pub took_press: bool,
     rescan: f32,
+    /// The selection last frame (a loose game that becomes the selection goes back to the display).
+    last_selected: Option<String>,
 }
 
 /// What the display should do with a game this frame.
@@ -229,7 +232,11 @@ pub fn toss_step(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     items: Query<(&Item, &Transform)>,
+    cfg: Res<crate::config::Config>,
+    view: Res<ViewState>,
 ) {
+    let picked = (toss.last_selected != view.selected_id).then(|| view.selected_id.clone()).flatten();
+    toss.last_selected = view.selected_id.clone();
     if !toss.busy() {
         toss.sim = None;
         return;
@@ -237,6 +244,13 @@ pub fn toss_step(
     let now = time.elapsed_seconds();
     let dt = time.delta_seconds().min(0.1);
     let toss = &mut *toss;
+    // A loose game (not in hand) that is scrolled to leaves the physics and is shown like any
+    // other selection.
+    if let Some(id) = picked.filter(|id| toss.loose.get(id).is_some_and(|l| l.state != State::Held)) {
+        if let Some(l) = toss.loose.remove(&id) {
+            toss.remove(l.body);
+        }
+    }
 
     // Back from the void.
     let back: Vec<String> = toss.away.iter().filter(|(_, &t)| now >= t).map(|(id, _)| id.clone()).collect();
@@ -252,11 +266,6 @@ pub fn toss_step(
     for l in toss.loose.values_mut() {
         if l.state == State::Held && !buttons.pressed(MouseButton::Left) {
             l.state = State::Floating;
-            if let Some(b) = sim.bodies.get_mut(l.body) {
-                b.set_gravity_scale(0.0, true);
-                b.set_linear_damping(3.0);
-                b.set_angular_damping(3.0);
-            }
         }
         if !modifier && matches!(l.state, State::Held | State::Floating) {
             l.state = State::Falling(now);
@@ -349,7 +358,9 @@ pub fn toss_step(
             let (lv, av) = (*b.linvel(), *b.angvel());
             let (v, w) = (Vec3::new(lv.x, lv.y, lv.z), Vec3::new(av.x, av.y, av.z));
             let a = (tp - p) * SPRING - v * DAMP;
-            let err = (tr * r.inverse()).to_scaled_axis();
+            // q and -q are the same turn; take the short way round (else it spins a full flip).
+            let q = tr * r.inverse();
+            let err = if q.w < 0.0 { -q } else { q }.to_scaled_axis();
             let aw = err * SPRING - w * DAMP;
             let (v, w) = (v + a * step, w + aw * step);
             b.set_linvel(vector![v.x, v.y, v.z], true);
@@ -366,13 +377,32 @@ pub fn toss_step(
         }
     }
 
-    // Fallen far enough: gone, back later.
-    let fallen: Vec<String> = toss.loose.iter().filter(|(_, l)| matches!(l.state, State::Falling(t) if now - t > FALL_TIME)).map(|(id, _)| id.clone()).collect();
+    // Dropped and off the screen (a good way past its edge): gone, back later. A while after it
+    // was dropped it stops hitting the others, so it cannot stay resting on them.
+    let view = camera.get_single().ok();
+    let size = windows.get_single().map(|w| Vec2::new(w.width(), w.height())).unwrap_or(Vec2::new(1920.0, 1080.0));
+    let mut fallen = Vec::new();
+    for (id, l) in &toss.loose {
+        let State::Falling(t) = l.state else { continue };
+        let Some(b) = sim.bodies.get(l.body) else { continue };
+        let p = to_bevy(b.position()).0;
+        let on_screen = view.and_then(|(cam, tf)| cam.world_to_viewport(tf, p)).is_some_and(|v| v.cmpge(-size * 0.25).all() && v.cmple(size * 1.25).all());
+        if !on_screen || now - t > MAX_FALL {
+            fallen.push(id.clone());
+        } else if now - t > SOLID_TIME {
+            for &c in b.colliders() {
+                if let Some(c) = sim.colliders.get_mut(c) {
+                    c.set_collision_groups(InteractionGroups::none());
+                }
+            }
+        }
+    }
+    let away = cfg.animation.toss_respawn.clamp(0.0, 600.0);
     for id in fallen {
         if let Some(l) = toss.loose.remove(&id) {
             sim.bodies.remove(l.body, &mut sim.islands, &mut sim.colliders, &mut sim.impulse, &mut sim.multibody, true);
         }
-        toss.away.insert(id, now + AWAY_TIME);
+        toss.away.insert(id, now + away);
     }
 
     // Neighbours back in place and clear of everything loose are handed back to the display.

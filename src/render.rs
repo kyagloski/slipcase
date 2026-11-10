@@ -1707,13 +1707,18 @@ pub fn corner_radius(cfg: &Config, p: Platform) -> f32 {
 pub fn case_look(cfg: &Config, p: Platform) -> CaseLook {
     let mut l = p.case_look();
     if let Some(s) = cfg.platform_override(p).and_then(|o| o.case_color.as_deref()) {
-        let h = s.trim().trim_start_matches('#');
-        if let Ok(v) = u32::from_str_radix(h, 16) {
-            let (rgb, a) = if h.len() == 8 { (v >> 8, (v & 255) as f32 / 255.0) } else { (v, 1.0) };
-            l.shell = [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, a];
-        }
+        set_shell(&mut l, s);
     }
     l
+}
+
+/// Case plastic from a hex colour (#rrggbb, or #rrggbbaa for see-through).
+fn set_shell(l: &mut CaseLook, s: &str) {
+    let h = s.trim().trim_start_matches('#');
+    if let Ok(v) = u32::from_str_radix(h, 16) {
+        let (rgb, a) = if h.len() == 8 { (v >> 8, (v & 255) as f32 / 255.0) } else { (v, 1.0) };
+        l.shell = [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, a];
+    }
 }
 
 /// Margin round the printed art on a platform's case (as `CaseDims` works it out).
@@ -1992,7 +1997,8 @@ fn add_case(
     let key = format!("{}{:?}", c.key(), look.kind);
     let cardboard = look.kind == CaseKind::Box;
     let reflect = if cardboard { 0.15 } else { 0.5 };
-    let shell = if cx.cfg.display.rainbow_cases {
+    // A colour picked for this game wins over the rainbow.
+    let shell = if cx.cfg.display.rainbow_cases && game.case_color.is_empty() {
         // Its own random colour (fixed for this game this session), keeping the console's
         // translucency and finish.
         if cx.gfx.rainbow_seed == 0 {
@@ -2226,7 +2232,10 @@ fn add_case(
 
 pub fn spawn_item(commands: &mut Commands, cx: &mut SpawnCtx, game: &Game, view_index: usize, style: ItemStyle) -> Entity {
     let geo = geometry(cx.cfg, game.platform);
-    let look = case_look(cx.cfg, game.platform);
+    let mut look = case_look(cx.cfg, game.platform);
+    if !game.case_color.is_empty() {
+        set_shell(&mut look, &game.case_color);
+    }
     let (cw, ch, _) = geo.case;
     let ac = accent(cx.cfg, game.platform);
     let dims = item_dims(cx.cfg, game.platform, style);
