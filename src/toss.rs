@@ -92,6 +92,11 @@ pub enum Part {
 }
 
 impl Toss {
+    /// Picked up, thrown, shoved by one, or sliding back: physics is moving it, not the display.
+    pub fn physical(&self, id: &str) -> bool {
+        self.loose.contains_key(id) || self.near.contains_key(id) || self.returning.contains_key(id)
+    }
+
     pub fn part(&mut self, id: &str, now: f32) -> Part {
         if self.loose.contains_key(id) {
             if let Some(&(p, r)) = self.poses.get(id) {

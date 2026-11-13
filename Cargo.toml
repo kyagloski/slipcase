@@ -10,7 +10,7 @@ default = ["gamepad", "wayland"]
 # Native Wayland (needs libwayland-dev + libxkbcommon-dev at build time on Linux; X11 works without).
 wayland = ["bevy/wayland"]
 # Controller support (needs libudev-dev at build time on Linux).
-gamepad = ["bevy/bevy_gilrs"]
+gamepad = ["bevy/bevy_gilrs", "dep:gilrs"]
 
 [dependencies]
 bevy = { version = "0.14", default-features = false, features = [
@@ -27,6 +27,8 @@ bevy = { version = "0.14", default-features = false, features = [
     "x11",
 ] }
 serde = { version = "1", features = ["derive"] }
+# Watches for the home button on its own thread while the window sleeps in the background.
+gilrs = { version = "0.10", optional = true }
 serde_json = "1"
 toml = "0.8"
 dirs = "5"
@@ -42,6 +44,11 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Copy / paste in the settings text fields and search (X11, Wayland, Windows, macOS).
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 rapier3d = "0.22"
+# The window icon (the same winit Bevy uses).
+winit = { version = "0.30", default-features = false }
+
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

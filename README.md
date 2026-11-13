@@ -24,7 +24,7 @@ Flick through them like the old console dashboards, crack one open, and play.
 
 <br>
 
-<img src="docs/media/hero.gif" width="860" alt="Flicking through a library in Cover Flow over a neon synthwave grid, then flipping Cyberpunk 2077 to its back cover">
+<img src="docs/media/hero.gif" width="860" alt="Flicking through a library in Cover Flow over a neon synthwave grid, with a shine sweeping the selection and its reflection below, then flipping Stardew Valley to its back cover">
 
 <br>
 
@@ -66,7 +66,7 @@ through, with the description, screenshots and how many people are playing right
 </table>
 
 <div align="center">
-<img src="docs/media/case.gif" width="760" alt="Opening the Cyberpunk 2077 case to show the disc and the insert">
+<img src="docs/media/case.gif" width="760" alt="Opening the Grand Theft Auto: Vice City case in the Carousel to show the disc and the insert">
 </div>
 
 ### 🗂️ Fourteen ways to browse
@@ -75,7 +75,7 @@ Cover Flow, a carousel, a bookshelf, towers of stacked cases, a helix, a wall, a
 rows of spines and more. **Tab** flips between them, and the list can loop forever.
 
 <div align="center">
-<img src="docs/media/layouts.gif" width="640" alt="Pressing Tab to flip through the layouts">
+<img src="docs/media/layouts.gif" width="640" alt="Pressing Tab to flip through every layout, starting from the Spiral">
 </div>
 
 ### 🌌 Backgrounds with attitude
@@ -85,7 +85,7 @@ glow, blurred game art, or a picture or GIF of your own. Let them pick up the co
 you're on, or set your own palette with the colour picker.
 
 <div align="center">
-<img src="docs/media/backgrounds.gif" width="720" alt="Pressing B to cycle through every background behind Cuphead">
+<img src="docs/media/backgrounds.gif" width="720" alt="Pressing B to cycle through every background behind Stardew Valley in the Helix">
 </div>
 
 ### 🎲 Can't decide what to play?
@@ -94,7 +94,7 @@ Tap **Ctrl five times**. Your whole library rains onto a table, piles up with re
 climbs out of the pile for you.
 
 <div align="center">
-<img src="docs/media/egg.gif" width="640" alt="Every game falling onto a table and Pokemon Pearl rising out of the pile">
+<img src="docs/media/egg.gif" width="640" alt="Every game falling off the shelf onto a table and one rising out of the pile">
 </div>
 
 ### 🪟 Float over your desktop
@@ -119,14 +119,14 @@ desktop. Either way it gets out of the way the moment a game launches.
 - **🔍 Finds your games**: Steam, Epic, GOG, EA, Ubisoft, Heroic, Lutris and Flatpak, plus ROM folders and anything you drag onto the window. It works out the console from the file itself.
 - **🖼️ Art from everywhere**: SteamGridDB, Steam, LaunchBox, libretro and more, picked automatically. Or open the art picker and choose the cover, back, spine, disc and insert yourself.
 - **✋ Feels good to touch**: covers lean away from the mouse, drag a case to spin it, flick to send it spinning, scroll with momentum. **Ctrl + drag** picks a game up and lets you throw it into the others. Gamepads work too.
-- **🎨 Make it yours**: per-game case colours (see-through too), highlight colours, background palettes, motion styles, case corners, sizes, field of view. Every setting is in the menu and nothing needs a config file.
+- **🎨 Make it yours**: per-game case colours (see-through too), highlight colours, background palettes, motion styles, case corners, sizes, field of view, a shine across the selected game, a mirror reflection under it, glossy print, the shelf colour, retro screen filters (CRT, VHS, Game Boy, 8-bit, film grain and more) and the interface font (Minecraft-style pixels included). Every setting is in the menu and nothing needs a config file.
 - **🍷 Windows games on Linux**: programs and installers run through Proton, with a per-game Proton build and options.
 - **📦 Owned but not installed?** Optional. They show up with a download badge, and Enter opens the store's install dialog.
 - **⚡ Fast**: one Rust binary on Bevy, with every cover, spine and disc cached after the first run.
 
 <div align="center">
 
-**Plays nice with:** PC • NES • SNES • N64 • GameCube • Wii • Switch • Game Boy / Color / Advance • DS • 3DS<br>
+**Plays nice with:** PC • NES • SNES • N64 • GameCube • Wii • Switch • Switch 2 • Game Boy / Color / Advance • DS • 3DS<br>
 PlayStation 1–5 • PSP • Vita • Xbox • Xbox 360 • Xbox One • Genesis • Saturn • Dreamcast
 
 </div>
@@ -173,7 +173,9 @@ Box art and game details come from [SteamGridDB](https://www.steamgriddb.com),
 [LaunchBox Games Database](https://gamesdb.launchbox-app.com), Steam and
 [libretro-thumbnails](https://github.com/libretro-thumbnails/libretro-thumbnails). The PS2 background
 follows the lovely recreation at [imsaud.me](https://www.imsaud.me), and the settings icons are
-[Twemoji](https://github.com/jdecked/twemoji) (CC-BY 4.0). Built with [Bevy](https://bevyengine.org)
+[Twemoji](https://github.com/jdecked/twemoji) (CC-BY 4.0). The bundled fonts are
+[Monocraft](https://github.com/IdreesInc/Monocraft), Press Start 2P, VT323, Silkscreen, Orbitron, Audiowide
+and Bungee, all under the SIL Open Font License. Built with [Bevy](https://bevyengine.org)
 and [Rapier](https://rapier.rs).
 
 <div align="center">

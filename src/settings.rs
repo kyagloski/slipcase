@@ -186,6 +186,7 @@ const CASE_COLORS: [(&str, &str); 11] = [
 
 /// The cover download settings, a group inside "Cases and discs".
 const SUB_COVERS: &str = "Covers";
+const SUB_FILTERS: &str = "Filters";
 
 /// Every named category header (the ones that can be folded).
 fn category_headers() -> Vec<&'static str> {
@@ -260,6 +261,11 @@ fn entries() -> Vec<Entry> {
         num!("Item size", display.item_scale, 0.4, 2.5, 0.05, Effect::View),
         num!("Zoom", display.zoom, 0.45, 4.0, 0.05, Effect::Zoom),
         num!("Selected game distance", display.selected_distance, 15.0, 90.0, 1.0, Effect::None),
+        num!("Selected game angle", display.selected_angle, -45.0, 45.0, 1.0, Effect::None),
+        toggle!("Shine when selected", display.selected_shine, Effect::None),
+        toggle!("Reflection under selected", display.selected_reflection, Effect::None),
+        num!("Gloss", display.gloss, 0.0, 1.0, 0.05, Effect::None),
+        color!("Shelf and table colour", display.shelf_color),
         num!("Open case size", display.open_case_size, 0.3, 1.0, 0.02, Effect::None),
         adv(num!("Spacing", display.spacing_scale, 0.4, 2.5, 0.05, Effect::View)),
         adv(num!("Field of view", display.field_of_view, 15.0, 90.0, 1.0, Effect::None)),
@@ -340,8 +346,10 @@ fn entries() -> Vec<Entry> {
         toggle!("Open the case and take the game out", launch.open_case, Effect::None),
         options!("Taking the game out", launch.open_style, ["drive", "spin", "flip", "fly", "rise"], Effect::None),
         adv(num!("Open-case length (s)", launch.open_duration, 1.0, 6.0, 0.1, Effect::None)),
-        adv(toggle!("Minimize after launching", general.minimize_on_launch, Effect::None)),
+        toggle!("Minimize after launching", general.minimize_on_launch, Effect::None),
         toggle!("Close after launching", general.close_on_launch, Effect::None),
+        toggle!("Controller home button shows Slipcase", general.home_button, Effect::Window),
+        toggle!("Nintendo button layout (A on the right)", general.nintendo_buttons, Effect::None),
         header!("Motion"),
         num!("Speed", animation.speed, 0.2, 4.0, 0.1, Effect::None),
         options!("Selection motion", animation.motion, ["direct", "flip", "tumble", "roll", "dip", "swoop"], Effect::None),
@@ -355,11 +363,31 @@ fn entries() -> Vec<Entry> {
         header!("Screen"),
         toggle!("Fullscreen", general.fullscreen, Effect::Window),
         adv(toggle!("Vsync", general.vsync, Effect::Window)),
+        adv(toggle!("Adaptive sync (with vsync)", general.adaptive_sync, Effect::Window)),
         toggle!("Potato mode (much faster, plainer looks)", general.potato, Effect::Potato),
         num!("Brightness", general.brightness, 0.2, 3.0, 0.05, Effect::None),
         num!("UI scale", general.ui_scale, 0.5, 2.0, 0.05, Effect::UiScale),
+        options!("Font", general.font, ["default", "minecraft", "arcade", "terminal", "tiny pixel", "sci-fi", "retro future", "signage"], Effect::None),
+        toggle!("Show FPS", general.show_fps, Effect::None),
         adv(toggle!("Shadows", general.shadows, Effect::None)),
         adv(num!("FPS in background (0 = paused)", general.background_fps, 0.0, 30.0, 1.0, Effect::Window)),
+        // Screen filters, as a group of their own; any number can be on at once.
+        Entry { label: SUB_FILTERS, kind: Kind::Sub(SUB_FILTERS), effect: Effect::None, advanced: false },
+        toggle!("Filters on (all the ticked ones below; X)", filters.enabled, Effect::None),
+        toggle!("Filters cover on-screen text too", filters.cover_menus, Effect::None),
+        toggle!("CRT television", filters.crt, Effect::None),
+        options!("CRT colour", filters.crt_colour, ["colour", "amber", "green", "white"], Effect::None),
+        toggle!("Pixelated (16-bit)", filters.pixelate, Effect::None),
+        toggle!("256 colours (8-bit)", filters.posterize, Effect::None),
+        toggle!("Game Boy screen", filters.game_boy, Effect::None),
+        toggle!("VHS tape", filters.vhs, Effect::None),
+        toggle!("Film grain", filters.film_grain, Effect::None),
+        toggle!("Vignette", filters.vignette, Effect::None),
+        toggle!("Black and white", filters.black_and_white, Effect::None),
+        toggle!("Sepia", filters.sepia, Effect::None),
+        toggle!("Chromatic aberration", filters.chromatic_aberration, Effect::None),
+        num!("Retro resolution (lines)", filters.retro_lines, 120.0, 720.0, 8.0, Effect::None),
+        num!("Filter strength", filters.strength, 0.1, 2.0, 0.05, Effect::None),
         // Filled in from the library, see `hidden_entries`.
         header!(HIDDEN_HEADER),
     ]
@@ -613,6 +641,8 @@ impl Plugin for SettingsPlugin {
             .add_systems(Update, draw_menu_icons.after(draw_menu))
             .add_systems(Update, size_value_boxes.after(draw_menu))
             .add_systems(Update, draw_sliders.after(draw_menu))
+            .add_systems(Update, measure_picked_font)
+            .add_systems(PostUpdate, menu_camera.before(bevy::ui::UiSystem::Layout))
             .add_systems(Update, (menu_input, color_pick_input, menu_pickers, draw_menu, draw_edit_dialog, draw_restart_prompt, draw_color_picker).chain());
     }
 }
@@ -625,12 +655,14 @@ struct MenuFonts {
     bold: Handle<Font>,
     /// The regular face again, for measuring text (where the cursor and selection go).
     measure: Option<std::sync::Arc<fontdue::Font>>,
+    /// The font picked in Screen > Font, which the text then wears instead (see fonts.rs).
+    picked: Option<std::sync::Arc<fontdue::Font>>,
 }
 
 impl MenuFonts {
     /// Width of `s` in logical pixels at `px`, as the UI lays it out (advances plus kerning).
     fn width(&self, s: &str, px: f32) -> f32 {
-        let Some(f) = &self.measure else { return s.chars().count() as f32 * px * 0.6 };
+        let Some(f) = self.picked.as_ref().or(self.measure.as_ref()) else { return s.chars().count() as f32 * px * 0.6 };
         // Bevy's text renderer scales a font so ascent - descent is `px` tall; fontdue scales
         // by the em square. Convert so both agree.
         let px = match f.horizontal_line_metrics(1.0) {
@@ -647,6 +679,61 @@ impl MenuFonts {
             prev = Some(c);
         }
         w
+    }
+}
+
+/// Keeps the edit dialog's cursor measuring in the font the text wears.
+fn measure_picked_font(cfg: Res<Config>, mut fonts: ResMut<MenuFonts>, mut applied: Local<Option<String>>) {
+    if applied.as_ref() == Some(&cfg.general.font) {
+        return;
+    }
+    *applied = Some(cfg.general.font.clone());
+    fonts.picked = crate::fonts::font_bytes(&cfg.general.font)
+        .and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok())
+        .map(std::sync::Arc::new);
+}
+
+/// Draws the settings windows (panel, dialogs, pickers) after the screen filters, so they stay
+/// readable even with "Filters cover on-screen text too". Only on while one of them is open.
+#[derive(Component)]
+struct MenuCamera;
+
+#[allow(clippy::type_complexity)]
+fn menu_camera(
+    mut commands: Commands,
+    main: Query<&Camera, (With<crate::app::MainCamera>, Without<MenuCamera>)>,
+    mut cam: Query<(Entity, &mut Camera), With<MenuCamera>>,
+    roots: Query<(Entity, &Style, Option<&TargetCamera>), Or<(With<MenuPanel>, With<RestartPrompt>, With<EditDialog>, With<PickLayer>, With<ArtLayer>)>>,
+) {
+    let Ok(main) = main.get_single() else { return };
+    let Ok((id, mut c)) = cam.get_single_mut() else {
+        // Like the background camera: same HDR setting as the main one, so they share the
+        // picture and this one draws over it.
+        commands.spawn((
+            Camera2dBundle {
+                camera: Camera { order: 1, hdr: main.hdr, is_active: false, clear_color: ClearColorConfig::None, ..default() },
+                tonemapping: bevy::core_pipeline::tonemapping::Tonemapping::None,
+                deband_dither: bevy::core_pipeline::tonemapping::DebandDither::Disabled,
+                ..default()
+            },
+            // Nothing 2D to draw: only the menus.
+            bevy::render::view::RenderLayers::layer(7),
+            MenuCamera,
+        ));
+        return;
+    };
+    let mut open = false;
+    for (e, style, target) in &roots {
+        if target.map(|t| t.entity()) != Some(id) {
+            commands.entity(e).insert(TargetCamera(id));
+        }
+        open |= style.display != Display::None;
+    }
+    if c.is_active != open {
+        c.is_active = open;
+    }
+    if c.hdr != main.hdr {
+        c.hdr = main.hdr;
     }
 }
 
@@ -674,10 +761,10 @@ fn load_menu_fonts(fonts: &mut Assets<Font>) -> MenuFonts {
             // The bold face also goes in place of Bevy's built-in font (a small monospace subset without symbols
             // such as the trademark sign), which the titles and info on screen use.
             fonts.insert(&Handle::<Font>::default(), bf.clone());
-            return MenuFonts { regular: fonts.add(rf), bold: fonts.add(bf), measure };
+            return MenuFonts { regular: fonts.add(rf), bold: fonts.add(bf), measure, picked: None };
         }
     }
-    MenuFonts { regular: Handle::default(), bold: Handle::default(), measure: None }
+    MenuFonts { regular: Handle::default(), bold: Handle::default(), measure: None, picked: None }
 }
 
 // Menu colours.
@@ -1720,6 +1807,13 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
         Kind::Toggle(f) => {
             let v = f(&mut ctx.cfg.data);
             *v = !*v;
+            // Minimize and close after launching: one or the other.
+            let g = &mut ctx.cfg.data.general;
+            match menu.entries[i].label {
+                "Minimize after launching" if g.minimize_on_launch => g.close_on_launch = false,
+                "Close after launching" if g.close_on_launch => g.minimize_on_launch = false,
+                _ => {}
+            }
             apply(ctx, effect);
             if effect == Effect::Restart {
                 menu.restart_prompt = true;
@@ -2204,7 +2298,7 @@ fn menu_input(
     }
 
     // The quit keys (Q, Esc) close the settings rather than quitting from them.
-    if toggle || keys.just_pressed(KeyCode::Escape) || keys_pressed(&ctx.cfg.keys.quit, &keys) || pressed_pad(GamepadButtonType::East) {
+    if toggle || keys.just_pressed(KeyCode::Escape) || keys_pressed(&ctx.cfg.keys.quit, &keys) || pressed_pad(crate::app::face(&ctx.cfg, GamepadButtonType::East)) {
         close(&mut menu);
         return;
     }
@@ -2225,7 +2319,7 @@ fn menu_input(
     }
     let left = keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) || pressed_pad(GamepadButtonType::DPadLeft);
     let right = keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) || pressed_pad(GamepadButtonType::DPadRight);
-    let enter = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) || pressed_pad(GamepadButtonType::South);
+    let enter = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) || pressed_pad(crate::app::face(&ctx.cfg, GamepadButtonType::South));
     if left {
         change(&mut menu, &mut ctx, -1);
     } else if right {
@@ -2583,10 +2677,19 @@ fn pick_rgb_to_hsv(c: [f32; 3]) -> Vec3 {
     Vec3::new(h, if mx == 0.0 { 0.0 } else { d / mx }, mx)
 }
 
-/// The picked colour as stored: a case colour carries its opacity as a fourth byte.
+/// Config colours that can be see-through (they get the opacity bar, like case colours).
+const SEE_THROUGH: &[&str] = &["Shelf and table colour"];
+
+impl ColorPick {
+    fn has_opacity(&self) -> bool {
+        matches!(self.target, PickTarget::Game(_)) || SEE_THROUGH.contains(&self.title)
+    }
+}
+
+/// The picked colour as stored: a see-through colour carries its opacity as a fourth byte.
 fn pick_out(p: &ColorPick) -> String {
     let hex = pick_hex(p.hsv);
-    if matches!(p.target, PickTarget::Game(_)) && p.alpha < 0.995 {
+    if p.has_opacity() && p.alpha < 0.995 {
         format!("{hex}{:02x}", (p.alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
     } else {
         hex
@@ -2605,7 +2708,8 @@ fn open_color_pick(menu: &mut Menu, ctx: &mut Ctx, title: &'static str, f: fn(&m
     let original = f(&mut ctx.cfg.data).clone();
     let was_adaptive = ctx.cfg.background.adaptive;
     ctx.cfg.data.background.adaptive = false;
-    menu.color = Some(ColorPick { target: PickTarget::Cfg(f), title, hsv: pick_rgb_to_hsv(crate::config::parse_hex(&original)), original, was_adaptive, drag: 0, moved: false, alpha: 1.0 });
+    let (rgb, alpha) = crate::config::parse_hex_alpha(&original);
+    menu.color = Some(ColorPick { target: PickTarget::Cfg(f), title, hsv: pick_rgb_to_hsv(rgb), original, was_adaptive, drag: 0, moved: false, alpha });
 }
 
 fn spawn_color_picker(mut commands: Commands, fonts: Res<MenuFonts>, mut images: ResMut<Assets<Image>>) {
@@ -2938,7 +3042,7 @@ fn draw_color_picker(
     for mut s in &mut mark {
         s.left = Val::Px(hsv.x * PICK_W - 3.0);
     }
-    let case = matches!(pick.target, PickTarget::Game(_));
+    let case = pick.has_opacity();
     for (mut s, bar) in &mut alpha_bar {
         if bar {
             let d = if case { Display::Flex } else { Display::None };

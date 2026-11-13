@@ -112,6 +112,7 @@ pub fn lb_platform(p: Platform) -> Option<&'static str> {
         Platform::Gamecube => "Nintendo GameCube",
         Platform::Wii => "Nintendo Wii",
         Platform::Switch => "Nintendo Switch",
+        Platform::Switch2 => "Nintendo Switch 2",
         Platform::Genesis => "Sega Genesis",
         Platform::Saturn => "Sega Saturn",
         Platform::Dreamcast => "Sega Dreamcast",

@@ -328,6 +328,7 @@ pub fn egg_run(
                 ..default()
             },
             EggDecor,
+            crate::app::ShelfPaint,
         ));
         // The table top, slippery, with nothing round it: games that slide off fall away.
         sim.colliders.insert(ColliderBuilder::cuboid(width * 0.5, thick * 0.5, depth * 0.5).translation(vector![0.0, TABLE_Y - thick * 0.5, 0.0]).friction(0.4).build());

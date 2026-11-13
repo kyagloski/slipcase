@@ -224,11 +224,20 @@ impl BackgroundStyle {
 pub struct General {
     pub fullscreen: bool,
     pub vsync: bool,
+    /// With vsync: a frame that is late shows straight away (a tear) instead of waiting for the
+    /// next refresh (a stutter). Uses plain vsync where the driver lacks it.
+    pub adaptive_sync: bool,
+    /// The interface font: one of the bundled ones (see fonts.rs) or a path to a .ttf / .otf.
+    pub font: String,
     /// 1, 2, 4 or 8.
     pub msaa: u32,
     pub window_width: f32,
     pub window_height: f32,
     pub minimize_on_launch: bool,
+    /// The controller's home button brings the window back (also when minimized).
+    pub home_button: bool,
+    /// Nintendo face buttons (A on the right, B at the bottom): A still opens, B still closes.
+    pub nintendo_buttons: bool,
     /// Quit Slipcase once a game has started.
     pub close_on_launch: bool,
     /// No window border and no background: the cases float over your other windows.
@@ -240,6 +249,8 @@ pub struct General {
     /// "postmultiplied" or "inherit". Try another if the overlay shows a black background.
     pub overlay_alpha: String,
     pub show_hints: bool,
+    /// Frames per second and frame time in the top left corner.
+    pub show_fps: bool,
     pub show_info: bool,
     /// The line under the title: platform, year, genres, plays.
     pub show_details: bool,
@@ -268,15 +279,20 @@ impl Default for General {
         Self {
             fullscreen: false,
             vsync: true,
+            adaptive_sync: true,
+            font: "default".into(),
             msaa: 4,
             window_width: 1600.0,
             window_height: 900.0,
             minimize_on_launch: false,
+            home_button: false,
+            nintendo_buttons: false,
             close_on_launch: false,
             overlay: false,
             overlay_alpha: "auto".into(),
             last_game: String::new(),
             show_hints: true,
+            show_fps: false,
             show_info: true,
             show_details: true,
             bloom: true,
@@ -350,6 +366,16 @@ pub struct Display {
     pub selected_distance: f32,
     /// How far games lean away from the mouse (1 = as designed).
     pub hover_tilt_strength: f32,
+    /// The selected game turns this far to the left (negative) or right (degrees).
+    pub selected_angle: f32,
+    /// Two white bands sweep across a game when it is selected.
+    pub selected_shine: bool,
+    /// A mirror floor under the selected game reflecting the games (not in the wall / table).
+    pub selected_reflection: bool,
+    /// Strength of the white highlight over the games' front art (0 = none).
+    pub gloss: f32,
+    /// Hex colour of the shelf board and the easter egg's table ("#rrggbbaa" is see-through).
+    pub shelf_color: String,
 }
 
 impl Default for Display {
@@ -382,6 +408,11 @@ impl Default for Display {
             hover_tilt: true,
             selected_distance: 34.0,
             hover_tilt_strength: 1.0,
+            selected_angle: 10.0,
+            selected_shine: true,
+            selected_reflection: false,
+            gloss: 0.3,
+            shelf_color: "#757880".into(),
         }
     }
 }
@@ -435,6 +466,66 @@ impl Default for Background {
             overlay_halfway: false,
             overlay_halfway_size: 0.75,
             overlay_halfway_opacity: 1.0,
+        }
+    }
+}
+
+/// Screen filters drawn over the background and the games (not the menus). Any number can be
+/// on at once; with all of them off the filter pass does not run at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Filters {
+    /// Master switch: off shows none of the filters but keeps which ones are picked
+    /// (`keys.toggle_filters`, X by default).
+    pub enabled: bool,
+    /// Old monitor, after cool-retro-term: curved glass in a bezel, phosphor glow, scanlines, an
+    /// RGB shadow mask, flicker, static and a rolling band.
+    pub crt: bool,
+    /// The CRT's phosphor: `colour`, `amber`, `green` or `white` (one colour, like a terminal).
+    pub crt_colour: String,
+    /// Big square pixels and 15-bit colour, like a 16-bit console.
+    pub pixelate: bool,
+    /// 256 colours (3-3-2 bits) with ordered dithering, like 8-bit hardware.
+    pub posterize: bool,
+    /// Four shades of green, like the original Game Boy screen.
+    pub game_boy: bool,
+    /// Worn tape: wobbling lines, colour bleed, noise and a rolling tracking band.
+    pub vhs: bool,
+    /// Moving film grain.
+    pub film_grain: bool,
+    pub vignette: bool,
+    pub black_and_white: bool,
+    pub sepia: bool,
+    /// Colour fringes towards the edges, like a cheap lens.
+    pub chromatic_aberration: bool,
+    /// Lines down the screen for "pixelate" (and the CRT's scanlines with it), whatever the
+    /// window size: 224-240 is what 16-bit consoles drew.
+    pub retro_lines: f32,
+    /// How strong every filter is (1 = as designed).
+    pub strength: f32,
+    /// The filters also cover the on-screen text: titles, info, hints, buttons (never the
+    /// settings, which stay readable).
+    pub cover_menus: bool,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            crt: false,
+            crt_colour: "colour".into(),
+            pixelate: false,
+            posterize: false,
+            game_boy: false,
+            vhs: false,
+            film_grain: false,
+            vignette: false,
+            black_and_white: false,
+            sepia: false,
+            chromatic_aberration: false,
+            retro_lines: 240.0,
+            strength: 1.0,
+            cover_menus: false,
         }
     }
 }
@@ -837,6 +928,8 @@ pub struct Keys {
     pub prev_layout: Vec<String>,
     pub next_style: Vec<String>,
     pub next_background: Vec<String>,
+    /// All the picked screen filters off / on again.
+    pub toggle_filters: Vec<String>,
     pub next_platform: Vec<String>,
     pub prev_platform: Vec<String>,
     pub favorite: Vec<String>,
@@ -875,6 +968,7 @@ impl Default for Keys {
             prev_layout: v(&["K", "Shift+Tab"]),
             next_style: v(&["V"]),
             next_background: v(&["B"]),
+            toggle_filters: v(&["X"]),
             next_platform: v(&["PageDown", "]"]),
             prev_platform: v(&["PageUp", "["]),
             favorite: v(&["H"]),
@@ -903,6 +997,7 @@ pub struct ConfigData {
     pub background: Background,
     pub animation: Animation,
     pub launch: Launch,
+    pub filters: Filters,
     pub scan: Scan,
     pub covers: Covers,
     pub keys: Keys,
@@ -1084,6 +1179,13 @@ impl Config {
     pub fn command_for(&self, p: Platform) -> String {
         self.platform_override(p).and_then(|o| o.command.clone()).unwrap_or_else(|| p.default_command().to_string())
     }
+}
+
+/// "#rrggbb" or "#rrggbbaa": the colour and its opacity.
+pub fn parse_hex_alpha(s: &str) -> ([f32; 3], f32) {
+    let s = s.trim().trim_start_matches('#');
+    let a = s.get(6..8).and_then(|a| u8::from_str_radix(a, 16).ok()).map_or(1.0, |a| a as f32 / 255.0);
+    (parse_hex(s.get(..6).unwrap_or(s)), a)
 }
 
 pub fn parse_hex(s: &str) -> [f32; 3] {

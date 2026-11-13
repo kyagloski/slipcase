@@ -51,7 +51,7 @@ extensions = ["iso", "chd"]
 | Home / End | First / last | F11 | Fullscreen |
 | I | Toggle info | Q or Esc | Quit (closes the settings or an open case first) |
 | F | Flip (see the back) | Z / C | Turn 90 degrees (spine, back, edge) |
-| M, F1 or the gear button | Settings menu | | |
+| M, F1 or the gear button | Settings menu | X | Screen filters off / on |
 
 The settings menu (also `slipcase --settings`; technical options sit under each category's "Advanced" row); Reset at the bottom (click twice to confirm) puts every setting back to its default but keeps your folders, hidden games, per-console overrides and API keys has every display option plus adding games, ROM folders,
 choosing a cover, renaming, changing a game's platform, its location (the file, program or URI it starts;
@@ -80,7 +80,7 @@ Mouse: hovering lifts the game under the cursor, outlines it and leans it away f
 coasts on, slowing down; any click stops it), right-drag rotates the selected
 case freely (a short right click flips it), click selects, double-click launches, wheel browses (scrolls rows on the wall), ctrl + wheel zooms.
 
-Gamepad: D-pad or left stick browse, A launch, bumpers layout, X style, Y favourite, B background,
+Gamepad: D-pad or left stick browse, A launch, bumpers layout, X background, Y favourite, B open / close the case,
 right stick rotates the selected item, right stick click flips it, Start opens the settings.
 
 ### Games you own but have not installed
@@ -157,6 +157,21 @@ that still follows the cover, and bloom, anti-aliasing, shadows, the hover outli
 and the disc rainbow are all off. Covers load at 256 px at most, and only the games the layout actually shows
 are kept around the selection. It switches on and off without a restart, and your own values for those
 settings come back when it is turned off.
+
+**Font** (Settings > Screen > Font, `font` under `[general]`): the interface font. `default`, `minecraft`
+(Monocraft), `arcade` (Press Start 2P), `terminal` (VT323), `tiny pixel` (Silkscreen), `sci-fi` (Orbitron),
+`retro future` (Audiowide) or `signage` (Bungee), or a path to any .ttf / .otf file. Wide fonts like `arcade`
+may want a smaller "UI scale".
+
+**Filters** (Settings > Screen > Filters, or `[filters]` in the config): turn on as many as you like at once.
+`crt` (curved glass, scanlines, phosphor mask), `pixelate` (big pixels and 15-bit colour, like a 16-bit
+console), `posterize` (256 dithered colours, like 8-bit hardware), `game_boy` (four shades of green), `vhs`,
+`film_grain`, `vignette`, `black_and_white`, `sepia` and `chromatic_aberration`. `retro_lines` (240) sets
+how many pixels tall the pixelated picture is, and `strength` (1) scales every filter. `enabled` ("Filters on", or the X key) switches all
+the ticked ones off and on together without forgetting which they are. They cover the
+background and the games, not the menus, unless `cover_menus` ("Filters cover on-screen text too") is on: then the titles, info, hints and buttons
+are filtered as well. The settings are never filtered. With none on they cost nothing, and like everything else they are not
+drawn while Slipcase is in the background.
 
 ## Display modes
 

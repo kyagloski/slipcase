@@ -65,7 +65,12 @@ fn press_keys(mut rec: ResMut<Recorder>, mut keys: ResMut<ButtonInput<KeyCode>>)
     }
 }
 
-fn capture(mut rec: ResMut<Recorder>, mut shots: ResMut<ScreenshotManager>, window: Query<Entity, With<PrimaryWindow>>) {
+fn capture(mut rec: ResMut<Recorder>, mut shots: ResMut<ScreenshotManager>, window: Query<Entity, With<PrimaryWindow>>, mut winit: ResMut<bevy::winit::WinitSettings>) {
+    // Kept up: reloading the config (it autosaves) puts back drawing nothing in the background,
+    // and the recording window seldom has the focus.
+    if !matches!(winit.unfocused_mode, bevy::winit::UpdateMode::Continuous) {
+        winit.unfocused_mode = bevy::winit::UpdateMode::Continuous;
+    }
     let Ok(w) = window.get_single() else { return };
     let path = rec.dir.join(format!("{:05}.png", rec.frame));
     if shots

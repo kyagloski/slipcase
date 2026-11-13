@@ -1448,8 +1448,10 @@ fn cart_label(shape: CartShape) -> (f32, f32, f32, f32) {
         CartShape::Ds | CartShape::N3ds => (0.0, -0.1, 0.82, 0.6),
         CartShape::Switch => (0.0, -0.08, 0.80, 0.6),
         CartShape::Vita => (0.0, -0.05, 0.84, 0.68),
-        CartShape::Nes => (0.0, 0.2, 0.80, 0.45),
-        CartShape::Snes => (0.0, 0.06, 0.70, 0.55),
+        // The label (97 x 55 mm, 7 mm of it folded over the top) runs up to the top edge.
+        CartShape::Nes => (0.0, 0.32, 0.81, 0.36),
+        // 105 x 37.5 mm label across the top.
+        CartShape::Snes => (0.0, 0.19, 0.82, 0.43),
         CartShape::N64 => (0.0, 0.16, 0.6, 0.52),
         CartShape::Genesis => (0.0, 0.18, 0.78, 0.48),
         CartShape::Generic => (0.0, 0.12, 0.86, 0.62),

@@ -90,6 +90,10 @@ pub struct ViewState {
     pub hovered: Option<usize>,
     /// Lean of the hovered item away from the cursor, as a scaled rotation axis (item space).
     pub hover_tilt: Vec3,
+    /// Where the hovered item sits without its hover lean and lift (index, pose). The mouse is
+    /// tested against this too, so leaning away cannot drop the hover and start a back and
+    /// forth at the edge.
+    pub hover_rest: Option<(usize, Transform)>,
     /// Direction (item space) away from the cursor, scaled by how far off-centre it is.
     pub hover_away: Vec3,
     /// The cursor is on the item's spine or opening edge.
@@ -192,6 +196,7 @@ impl ViewState {
             last_selected: None,
             hovered: None,
             hover_tilt: Vec3::ZERO,
+            hover_rest: None,
             hover_away: Vec3::ZERO,
             hover_spine: false,
             hover_normal: Vec3::ZERO,
@@ -430,6 +435,7 @@ pub enum Action {
     PrevLayout,
     NextStyle,
     NextBackground,
+    ToggleFilters,
     NextPlatform,
     PrevPlatform,
     Favorite,
@@ -462,6 +468,9 @@ struct KeyLight;
 struct RimLight;
 #[derive(Component)]
 struct ShelfDecor;
+/// Furniture painted in "Shelf and table colour": the shelf board, the easter egg's table.
+#[derive(Component)]
+pub struct ShelfPaint;
 
 #[derive(Component)]
 struct GearButton;
@@ -582,6 +591,8 @@ impl Plugin for LauncherPlugin {
             .add_systems(Last, save_on_exit)
             .add_systems(Update, apply_cameras)
             .add_systems(Update, place_window)
+            .add_systems(Update, home_button)
+            .add_systems(Startup, start_home_watch)
             .add_systems(Update, fit_ui_scale)
             .add_systems(Update, crate::toss::toss_input.before(gather_mouse))
             .add_systems(Update, crate::toss::toss_step.after(crate::toss::toss_input).before(animate_items))
@@ -615,7 +626,7 @@ impl Plugin for LauncherPlugin {
                         launchbox_update,
                     )
                         .chain(),
-                    (animate_items, remember_zoom, run_cover_fades, apply_fades, animate_rigs, animate_camera, adapt_background, update_ui, config_watch, autosave).chain(),
+                    (animate_items, shine_selected, sheen_items, paint_shelves, remember_zoom, run_cover_fades, apply_fades, animate_rigs, animate_camera, adapt_background, update_ui, config_watch, autosave).chain(),
                 ),
             );
     }
@@ -651,13 +662,23 @@ fn msaa_from(n: u32) -> Msaa {
     }
 }
 
+/// Vsync on: adaptive (FIFO relaxed, falling back to plain FIFO where unsupported) or strict
+/// FIFO. Off: as fast as possible.
+pub fn present_mode(cfg: &Config) -> PresentMode {
+    match (cfg.general.vsync, cfg.general.adaptive_sync) {
+        (true, true) => PresentMode::AutoVsync,
+        (true, false) => PresentMode::Fifo,
+        (false, _) => PresentMode::AutoNoVsync,
+    }
+}
+
 pub fn apply_window(w: &mut Window, cfg: &Config) {
     // The overlay always covers the desktop as a maximised borderless window instead.
     let mode = if cfg.general.fullscreen && !w.transparent { WindowMode::BorderlessFullscreen } else { WindowMode::Windowed };
     if w.mode != mode {
         w.mode = mode;
     }
-    let pm = if cfg.general.vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync };
+    let pm = present_mode(cfg);
     if w.present_mode != pm {
         w.present_mode = pm;
     }
@@ -752,6 +773,7 @@ fn setup(
         },
         MainCamera,
         IsDefaultUiCamera,
+        RenderLayers::from_layers(&[0, crate::mirror::FLOOR_LAYER]),
     ));
     if hdr {
         cam.insert(BloomSettings { intensity: 0.10, ..BloomSettings::NATURAL });
@@ -766,6 +788,7 @@ fn setup(
             ..default()
         },
         KeyLight,
+        RenderLayers::from_layers(&[0, crate::mirror::GAME_LAYER]),
     ));
     commands.spawn((
         DirectionalLightBundle {
@@ -774,6 +797,7 @@ fn setup(
             ..default()
         },
         RimLight,
+        RenderLayers::from_layers(&[0, crate::mirror::GAME_LAYER]),
     ));
 
     // The shelf board (only in the shelf layout): grey, no back, placed every frame, fading
@@ -790,6 +814,7 @@ fn setup(
     commands.spawn((
         PbrBundle { mesh: meshes.add(shelf_board()), material: grey, visibility: Visibility::Hidden, ..default() },
         ShelfDecor,
+        ShelfPaint,
     ));
 
     setup_ui(&mut commands, &mut images);
@@ -948,6 +973,7 @@ fn gather_keyboard(
         (&k.prev_layout, Action::PrevLayout),
         (&k.next_style, Action::NextStyle),
         (&k.next_background, Action::NextBackground),
+        (&k.toggle_filters, Action::ToggleFilters),
         (&k.next_platform, Action::NextPlatform),
         (&k.prev_platform, Action::PrevPlatform),
         (&k.favorite, Action::Favorite),
@@ -1002,30 +1028,40 @@ fn gather_gamepad(
     axes: Res<Axis<GamepadAxis>>,
     time: Res<Time>,
     mut view: ResMut<ViewState>,
-    mut stick_t: Local<f32>,
+    // The direction held (d-pad or left stick), how long for, and the time to its next step.
+    mut held: Local<(Option<Action>, f32, f32)>,
     mut turning: Local<bool>,
     mut out: ResMut<Actions>,
     menu: Res<crate::settings::Menu>,
+    cfg: Res<Config>,
 ) {
     if view.searching || menu.open || menu.just_closed {
         return;
     }
     let mut stick = 0.0;
+    let mut stick_y = 0.0;
     let mut turned = false;
+    let mut dir = None;
     for pad in gamepads.iter() {
         let b = |t| buttons.just_pressed(GamepadButton::new(pad, t));
+        for (t, a) in [(GamepadButtonType::DPadLeft, Action::Left), (GamepadButtonType::DPadRight, Action::Right), (GamepadButtonType::DPadUp, Action::Up), (GamepadButtonType::DPadDown, Action::Down)] {
+            if buttons.pressed(GamepadButton::new(pad, t)) {
+                dir = Some(a);
+            }
+        }
+        // The triggers jump 5 games.
+        for (t, a) in [(GamepadButtonType::LeftTrigger2, Action::Left), (GamepadButtonType::RightTrigger2, Action::Right)] {
+            if b(t) {
+                out.0.extend([a; 5]);
+            }
+        }
         for (t, a) in [
-            (GamepadButtonType::DPadLeft, Action::Left),
-            (GamepadButtonType::DPadRight, Action::Right),
-            (GamepadButtonType::DPadUp, Action::Up),
-            (GamepadButtonType::DPadDown, Action::Down),
             // A opens the case, and launches once it is open (B closes it).
-            (GamepadButtonType::South, if view.inspecting() { Action::Launch } else { Action::Open }),
+            (face(&cfg, GamepadButtonType::South), if view.inspecting() { Action::Launch } else { Action::Open }),
             (GamepadButtonType::LeftTrigger, Action::PrevLayout),
             (GamepadButtonType::RightTrigger, Action::NextLayout),
-            (GamepadButtonType::West, Action::NextStyle),
-            (GamepadButtonType::North, Action::Favorite),
-            (GamepadButtonType::East, if view.inspecting() { Action::CloseCase } else { Action::NextBackground }),
+            (face(&cfg, GamepadButtonType::West), Action::NextBackground),
+            (face(&cfg, GamepadButtonType::North), Action::Favorite),
             (GamepadButtonType::Select, Action::NextPlatform),
             (GamepadButtonType::RightThumb, Action::Flip),
         ] {
@@ -1033,7 +1069,12 @@ fn gather_gamepad(
                 out.0.push(a);
             }
         }
+        // B opens the case, and closes it again.
+        if b(face(&cfg, GamepadButtonType::East)) {
+            out.0.push(if view.inspecting() { Action::CloseCase } else { Action::Open });
+        }
         stick += axes.get(GamepadAxis::new(pad, GamepadAxisType::LeftStickX)).unwrap_or(0.0);
+        stick_y += axes.get(GamepadAxis::new(pad, GamepadAxisType::LeftStickY)).unwrap_or(0.0);
         // Right stick turns the selected item around.
         let rx = axes.get(GamepadAxis::new(pad, GamepadAxisType::RightStickX)).unwrap_or(0.0);
         let ry = axes.get(GamepadAxis::new(pad, GamepadAxisType::RightStickY)).unwrap_or(0.0);
@@ -1057,14 +1098,33 @@ fn gather_gamepad(
         view.snap_turn();
     }
     *turning = turned;
-    if stick.abs() > 0.6 {
-        *stick_t += time.delta_seconds();
-        if *stick_t > 0.16 {
-            *stick_t = 0.0;
-            out.0.push(if stick > 0.0 { Action::Right } else { Action::Left });
+    if dir.is_none() && stick.abs() > 0.6 && stick.abs() >= stick_y.abs() {
+        dir = Some(if stick > 0.0 { Action::Right } else { Action::Left });
+    }
+    // Up and down too on the wall and table (elsewhere that jumps 8 games: the d-pad's job).
+    if dir.is_none() && stick_y.abs() > 0.6 && cfg.display.layout.is_grid() {
+        dir = Some(if stick_y > 0.0 { Action::Up } else { Action::Down });
+    }
+    // On the table the controller's up goes up the screen, to the rows further away.
+    if cfg.display.layout == LayoutKind::Table {
+        dir = dir.map(|a| match a {
+            Action::Up => Action::Down,
+            Action::Down => Action::Up,
+            a => a,
+        });
+    }
+    // Held: one step at once, then after a pause steps that come faster the longer it is held.
+    let dt = time.delta_seconds();
+    if held.0 != dir {
+        *held = (dir, 0.0, 0.3);
+        out.0.extend(dir);
+    } else if let Some(a) = dir {
+        held.1 += dt;
+        held.2 -= dt;
+        while held.2 <= 0.0 {
+            out.0.push(a);
+            held.2 += (0.16 / (1.0 + held.1 * 1.5)).max(0.03);
         }
-    } else {
-        *stick_t = 0.16;
     }
 }
 
@@ -1138,14 +1198,59 @@ fn drag_scroll(view: &mut ViewState, cfg: &Config, window: &Window, d: Vec2, acc
     }
 }
 
+/// Where a ray meets an item's box: (distance, offset across the face it hit in -1..1 item
+/// units, that face's normal), all in item space.
+fn hit_box(origin: Vec3, dir: Vec3, tf: &GlobalTransform, item: &Item, slack: bool) -> Option<(f32, Vec3, Vec3)> {
+    let inv = tf.affine().inverse();
+    let o = inv.transform_point3(origin);
+    let d = inv.transform_vector3(dir);
+    let mut half = item.dims * 0.5;
+    if slack {
+        half = half * 1.04 + Vec3::splat(0.3);
+    }
+    let (mut t0, mut t1) = (f32::NEG_INFINITY, f32::INFINITY);
+    for k in 0..3 {
+        if d[k].abs() < 1e-8 {
+            if o[k].abs() > half[k] {
+                return None;
+            }
+            continue;
+        }
+        let a = (-half[k] - o[k]) / d[k];
+        let b = (half[k] - o[k]) / d[k];
+        t0 = t0.max(a.min(b));
+        t1 = t1.min(a.max(b));
+    }
+    if t0 > t1 || t1 <= 0.0 {
+        return None;
+    }
+    let local = o + d * t0.max(0.0);
+    if item.round && local.truncate().length() > half.x.max(half.y) {
+        return None;
+    }
+    // Distances in local space are scaled; compare in world space.
+    let dist = tf.transform_point(local).distance(origin);
+    // Where on the face, against the item's real size (not the slack).
+    let p = local / (item.dims * 0.5).max(Vec3::splat(1e-3));
+    let k = (0..3).max_by(|&a, &b| p[a].abs().total_cmp(&p[b].abs())).unwrap_or(2);
+    let mut n = Vec3::ZERO;
+    n[k] = p[k].signum();
+    let mut r = p.clamp(Vec3::NEG_ONE, Vec3::ONE);
+    r[k] = 0.0;
+    Some((dist, r, n))
+}
+
 /// Which item is under the cursor (ray against each item's oriented bounding box).
 /// The item under the cursor, with where on it the cursor is: (index, offset across the face
 /// it hit in -1..1 item units, that face's normal), all in item space.
+/// `hovered`: the item hovered now and where it rests without its hover lean. It stays hovered
+/// while the cursor is over either, and where the cursor is on it is read from the resting
+/// pose, so the lean depends only on the cursor and never feeds back into itself.
 pub(crate) fn pick_at(
     window: &Window,
     camera: &Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     items: &Query<(&Item, &GlobalTransform, &InheritedVisibility)>,
-    hovered: Option<usize>,
+    hovered: Option<(usize, Option<Transform>)>,
 ) -> Option<(usize, Vec3, Vec3)> {
     let cursor = window.cursor_position()?;
     let (cam, cam_tf) = camera.get_single().ok()?;
@@ -1155,42 +1260,20 @@ pub(crate) fn pick_at(
         if !vis.get() {
             continue;
         }
-        let inv = tf.affine().inverse();
-        let o = inv.transform_point3(ray.origin);
-        let d = inv.transform_vector3(*ray.direction);
-        let mut half = item.dims * 0.5;
-        // A little slack on the hovered item, so leaning away does not drop the hover.
-        if hovered == Some(item.view_index) {
-            half = half * 1.04 + Vec3::splat(0.3);
-        }
-        let (mut t0, mut t1) = (f32::NEG_INFINITY, f32::INFINITY);
-        for k in 0..3 {
-            if d[k].abs() < 1e-8 {
-                if o[k].abs() > half[k] {
-                    t0 = f32::INFINITY;
-                }
-                continue;
+        let mut hit = None;
+        if let Some((_, rest)) = hovered.filter(|(i, _)| *i == item.view_index) {
+            if let Some(rest) = rest {
+                hit = hit_box(ray.origin, *ray.direction, &GlobalTransform::from(rest), item, false);
             }
-            let a = (-half[k] - o[k]) / d[k];
-            let b = (half[k] - o[k]) / d[k];
-            t0 = t0.max(a.min(b));
-            t1 = t1.min(a.max(b));
-        }
-        if t0 <= t1 && t1 > 0.0 {
-            let local = o + d * t0.max(0.0);
-            if item.round && local.truncate().length() > half.x.max(half.y) {
-                continue;
+            // A little slack on the hovered item as drawn, too.
+            if hit.is_none() {
+                hit = hit_box(ray.origin, *ray.direction, tf, item, true);
             }
-            // Distances in local space are scaled; compare in world space.
-            let hit = tf.transform_point(local);
-            let dist = hit.distance(ray.origin);
+        } else {
+            hit = hit_box(ray.origin, *ray.direction, tf, item, false);
+        }
+        if let Some((dist, r, n)) = hit {
             if best.map_or(true, |(bd, ..)| dist < bd) {
-                let p = local / half.max(Vec3::splat(1e-3));
-                let k = (0..3).max_by(|&a, &b| p[a].abs().total_cmp(&p[b].abs())).unwrap_or(2);
-                let mut n = Vec3::ZERO;
-                n[k] = p[k].signum();
-                let mut r = p.clamp(Vec3::NEG_ONE, Vec3::ONE);
-                r[k] = 0.0;
                 best = Some((dist, item.view_index, r, n));
             }
         }
@@ -1424,7 +1507,12 @@ fn gather_mouse(
         return;
     }
     // What is under the cursor (for the hover highlight).
-    let hit = if over_ui || drag.button.is_some() { None } else { pick_at(window, &camera, &items, view.hovered) };
+    let hit = if over_ui || drag.button.is_some() {
+        None
+    } else {
+        let rest = view.hover_rest.filter(|(i, _)| Some(*i) == view.hovered).map(|(_, t)| t);
+        pick_at(window, &camera, &items, view.hovered.map(|i| (i, rest)))
+    };
     let hovered = hit.map(|(i, ..)| i);
     // A click anywhere while typing a filter stops typing (the filter stays, like Enter).
     if view.searching && buttons.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
@@ -1679,6 +1767,11 @@ fn handle_actions(
             }
             Action::NextBackground => {
                 cfg.background.style = cfg.background.style.cycle(1);
+                persist.mark_cfg();
+            }
+            Action::ToggleFilters => {
+                cfg.filters.enabled = !cfg.filters.enabled;
+                toast.show(if cfg.filters.enabled { "Filters on" } else { "Filters off" });
                 persist.mark_cfg();
             }
             Action::NextPlatform | Action::PrevPlatform => {
@@ -2083,14 +2176,16 @@ fn run_launch(
                             game.play_count += 1;
                         }
                         persist.mark_lib();
-                        if overlay.0 || cfg.general.close_on_launch {
-                            // Save now: the autosave timer will not get another chance.
-                            lib.save();
-                            exit.send(AppExit::Success);
-                        } else if cfg.general.minimize_on_launch {
+                        if cfg.general.minimize_on_launch && !cfg.general.close_on_launch {
+                            // Also over the overlay, which otherwise quits: it rests until focused again.
                             if let Ok(mut w) = windows.get_single_mut() {
                                 w.set_minimized(true);
                             }
+                            ASLEEP.store(true, std::sync::atomic::Ordering::Relaxed);
+                        } else if overlay.0 || cfg.general.close_on_launch {
+                            // Save now: the autosave timer will not get another chance.
+                            lib.save();
+                            exit.send(AppExit::Success);
                         }
                     }
                     Err(e) => toast.show(format!("Could not launch: {e}")),
@@ -2300,6 +2395,334 @@ fn hover_glow(
         }
     }
     *lit = target;
+}
+
+/// The shine sweeping across the selected game; `t` is seconds since it started.
+#[derive(Component)]
+struct Shine {
+    t: f32,
+    mat: Handle<StandardMaterial>,
+    /// The game it is on, and where that was last frame (the sweep waits until it has arrived).
+    root: Entity,
+    last: Transform,
+}
+
+/// Two white bands sweep across the front of a game when it is selected: a quad over its front
+/// whose band texture slides along (clamped, so the bands only show inside the quad).
+#[allow(clippy::too_many_arguments)]
+fn shine_selected(
+    mut commands: Commands,
+    view: Res<ViewState>,
+    cfg: Res<Config>,
+    time: Res<Time>,
+    items: Query<(Entity, &Item, &Transform)>,
+    mut shines: Query<(Entity, &mut Shine)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut bands: Local<Option<Handle<Image>>>,
+    mut last: Local<Option<(usize, bool)>>,
+) {
+    const DELAY: f32 = 0.12;
+    const SWEEP: f32 = 0.5;
+    const REPEAT: f32 = 10.0;
+    if !cfg.display.selected_shine {
+        for (e, _) in &shines {
+            commands.entity(e).despawn_recursive();
+        }
+        *last = None;
+        return;
+    }
+    // Wall / table: only a game lifted out (clicked or picked) shines, and lifting the game
+    // that was already selected counts as selecting it.
+    let lifted = !view.grid || view.raised;
+    // Also respawn when the selected game was rebuilt (its children, the shine, went with it).
+    if *last != Some((view.selected, lifted)) || (lifted && shines.is_empty()) {
+        *last = Some((view.selected, lifted));
+        for (e, _) in &shines {
+            commands.entity(e).despawn_recursive();
+        }
+        if let Some((root, item, tf)) = items.iter().find(|(_, i, _)| lifted && i.view_index == view.selected) {
+            let tex = bands.get_or_insert_with(|| images.add(shine_image())).clone();
+            let mat = materials.add(StandardMaterial {
+                base_color_texture: Some(tex),
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                uv_transform: bevy::math::Affine2::from_translation(Vec2::new(1.0, 0.0)),
+                ..default()
+            });
+            let d = item.dims;
+            let mesh = meshes.add(if item.round { Mesh::from(Circle::new(d.x.min(d.y) * 0.5)) } else { Rectangle::new(d.x, d.y).into() });
+            let c_mesh = mesh.clone();
+            let shine = commands
+                .spawn((
+                    PbrBundle { mesh, material: mat.clone(), transform: Transform::from_xyz(0.0, 0.0, d.z * 0.5 + 0.03), ..default() },
+                    bevy::pbr::NotShadowCaster,
+                    bevy::pbr::NotShadowReceiver,
+                    Shine { t: 0.0, mat: mat.clone(), root, last: *tf },
+                ))
+                .with_children(|c| {
+                    // The same sweep on the back (seen when the game is flipped).
+                    c.spawn((
+                        PbrBundle {
+                            mesh: c_mesh.clone(),
+                            material: mat,
+                            transform: Transform::from_xyz(0.0, 0.0, -(d.z + 0.06)).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                            ..default()
+                        },
+                        bevy::pbr::NotShadowCaster,
+                        bevy::pbr::NotShadowReceiver,
+                    ));
+                })
+                .id();
+            commands.entity(root).add_child(shine);
+        }
+        return;
+    }
+    let dt = time.delta_seconds();
+    for (_, mut s) in &mut shines {
+        // Not before the game has arrived: picked out of a stack it is still turning round to
+        // face you, and the sweep would be over before the cover could be seen.
+        if let Ok((_, _, tf)) = items.get(s.root) {
+            let moving = tf.translation.distance(s.last.translation) > 3.0 * dt || tf.rotation.angle_between(s.last.rotation) > 0.6 * dt;
+            s.last = *tf;
+            if moving && s.t < DELAY {
+                s.t = 0.0;
+                continue;
+            }
+        }
+        // Sweeps again every REPEAT seconds while the game stays selected.
+        s.t = (s.t + dt) % REPEAT;
+        let k = ((s.t - DELAY) / SWEEP).clamp(0.0, 1.0);
+        // Eased so the bands rush in and slow a little as they leave; the texture's bands sit
+        // in its middle, so an offset of 1 -> -1 carries them from off one side to off the other.
+        let k = 1.0 - (1.0 - k) * (1.0 - k);
+        if let Some(m) = materials.get_mut(&s.mat) {
+            m.uv_transform = bevy::math::Affine2::from_translation(Vec2::new(1.0 - 2.0 * k, 0.0));
+        }
+    }
+}
+
+/// Recolours the furniture when "Shelf and table colour" changes, or a piece is spawned.
+fn paint_shelves(cfg: Res<Config>, all: Query<&Handle<StandardMaterial>, With<ShelfPaint>>, new: Query<(), Added<ShelfPaint>>, mut materials: ResMut<Assets<StandardMaterial>>, mut applied: Local<String>) {
+    if *applied == cfg.display.shelf_color && new.is_empty() {
+        return;
+    }
+    applied.clone_from(&cfg.display.shelf_color);
+    let (c, a) = crate::config::parse_hex_alpha(&cfg.display.shelf_color);
+    for h in &all {
+        if let Some(m) = materials.get_mut(h) {
+            // The shelf board's fade towards its ends is in its texture, so it is kept too.
+            m.base_color = Color::srgba(c[0], c[1], c[2], a);
+            if a < 1.0 {
+                m.alpha_mode = AlphaMode::Blend;
+            }
+        }
+    }
+}
+
+/// Marks a game that has had its gloss highlights put on (or had nowhere to put them).
+#[derive(Component)]
+struct Sheened;
+
+/// One gloss highlight, on a part of the game `0`. They all share one material (so they cost
+/// next to nothing and draw batched), except the selected game's, which get their own so their
+/// highlight can slide as it turns.
+#[derive(Component)]
+struct Sheen(Entity);
+
+/// The highlight texture's content fills the middle 60% of it (transparent round the edge), so
+/// sliding it about never smears its edge across the art.
+const SHEEN_SPAN: f32 = 0.6;
+
+fn sheen_uv(shift: Vec2) -> bevy::math::Affine2 {
+    bevy::math::Affine2::from_scale_angle_translation(Vec2::splat(SHEEN_SPAN), 0.0, Vec2::splat((1.0 - SHEEN_SPAN) * 0.5) + shift * SHEEN_SPAN)
+}
+
+/// "Gloss": a soft, uneven white highlight over each game's front and back art, as if the
+/// light caught its glossy print. Put on the art's own parts (so a case's lid takes its own when
+/// it opens), sized to them. The selected game's slides a little as it turns, leans and moves,
+/// the way a real reflection of the light would.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn sheen_items(
+    mut commands: Commands,
+    cfg: Res<Config>,
+    view: Res<ViewState>,
+    items: Query<(Entity, &Item, Option<&render::Fade>), Without<Sheened>>,
+    all_items: Query<&Item>,
+    children: Query<&Children>,
+    parts: Query<(&Handle<StandardMaterial>, &Handle<Mesh>), Without<Sheen>>,
+    mut sheens: Query<(Entity, &Sheen, &mut Handle<StandardMaterial>, &mut Visibility, &GlobalTransform)>,
+    cams: Query<&GlobalTransform, With<MainCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut shared: Local<Option<(Handle<Mesh>, Handle<Mesh>, Handle<Image>, Handle<StandardMaterial>)>>,
+    mut live: Local<HashMap<Entity, Handle<StandardMaterial>>>,
+) {
+    // Added light shows strongly on dark art, so it eases in and tops out low.
+    let g = cfg.display.gloss.clamp(0.0, 1.0).powi(2) * 0.3;
+    let (quad, disc, _, still) = shared
+        .get_or_insert_with(|| {
+            let tex = images.add(sheen_image());
+            let still = materials.add(StandardMaterial {
+                base_color: Color::WHITE.with_alpha(g),
+                base_color_texture: Some(tex.clone()),
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                uv_transform: sheen_uv(Vec2::ZERO),
+                ..default()
+            });
+            (meshes.add(Rectangle::new(1.0, 1.0)), meshes.add(Circle::new(0.5)), tex, still)
+        })
+        .clone();
+    if materials.get(&still).is_some_and(|m| (m.base_color.alpha() - g).abs() > 1e-4) {
+        if let Some(m) = materials.get_mut(&still) {
+            m.base_color = Color::WHITE.with_alpha(g);
+        }
+    }
+    let show = g > 1e-4;
+    let cam = cams.get_single().ok().map(|c| c.translation());
+    live.retain(|e, _| sheens.contains(*e));
+    for (e, sh, mut mat, mut vis, gt) in &mut sheens {
+        let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        let selected = show && all_items.get(sh.0).is_ok_and(|i| i.view_index == view.selected);
+        if !selected {
+            // Back to the shared one (only from its own: a fade may be wearing a copy for now).
+            if live.remove(&e).is_some_and(|own| *mat == own) {
+                *mat = still.clone();
+            }
+            continue;
+        }
+        // Slide the highlight by how the art faces the camera: square on it sits where drawn.
+        let Some(cam) = cam else { continue };
+        let v = (cam - gt.translation()).normalize_or_zero();
+        let off = v - *gt.back();
+        let uv = sheen_uv(Vec2::new(-off.dot(*gt.right()), off.dot(*gt.up())) * 0.35);
+        let own = live
+            .entry(e)
+            .or_insert_with(|| {
+                let m = materials.get(&still).cloned().unwrap_or_default();
+                materials.add(m)
+            })
+            .clone();
+        if *mat != own {
+            *mat = own.clone();
+        }
+        let stale = materials.get(&own).is_some_and(|m| (m.uv_transform.translation - uv.translation).length() > 0.002 || (m.base_color.alpha() - g).abs() > 1e-4);
+        if stale {
+            if let Some(m) = materials.get_mut(&own) {
+                m.uv_transform = uv;
+                m.base_color = Color::WHITE.with_alpha(g);
+            }
+        }
+    }
+    for (root, item, fade) in &items {
+        commands.entity(root).insert(Sheened);
+        for art in item.covers.first().iter().copied().chain(item.back.iter()).map(|c| &c.mat) {
+            // The part showing this art (fading in, it wears a copy of that material).
+            let part = children.iter_descendants(root).find(|e| {
+                parts.get(*e).is_ok_and(|(m, _)| m == art) || fade.is_some_and(|f| f.std.iter().any(|(fe, orig, _)| fe == e && orig == art))
+            });
+            let Some((part, mesh)) = part.and_then(|e| parts.get(e).ok().and_then(|(_, m)| meshes.get(m)).map(|m| (e, m))) else { continue };
+            let Some(aabb) = mesh.compute_aabb() else { continue };
+            let (c, h) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
+            // Flat art only: it lies across its thinnest side.
+            let i = if h.x <= h.y && h.x <= h.z { 0 } else if h.y <= h.z { 1 } else { 2 };
+            let flat = h[i] <= h[(i + 1) % 3].min(h[(i + 2) % 3]) * 0.2;
+            if !flat {
+                continue;
+            }
+            // Which way it faces comes from its normals: a back cover's mesh can face -z while
+            // sitting in the middle, and a highlight on its inside never shows.
+            let facing = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+                Some(bevy::render::mesh::VertexAttributeValues::Float32x3(ns)) => ns.iter().map(|v| v[i]).sum::<f32>(),
+                _ => c[i],
+            };
+            let mut n = Vec3::ZERO;
+            n[i] = if facing < 0.0 { -1.0 } else { 1.0 };
+            let rot = Quat::from_rotation_arc(Vec3::Z, n);
+            let size = Vec2::new((rot * Vec3::X).abs().dot(h), (rot * Vec3::Y).abs().dot(h)) * 2.0;
+            let e = commands
+                .spawn((
+                    PbrBundle {
+                        mesh: if item.round { disc.clone() } else { quad.clone() },
+                        material: still.clone(),
+                        transform: Transform::from_translation(c + n * (h[i] + 0.015)).with_rotation(rot).with_scale(size.extend(1.0)),
+                        visibility: if show { Visibility::Inherited } else { Visibility::Hidden },
+                        ..default()
+                    },
+                    bevy::pbr::NotShadowCaster,
+                    bevy::pbr::NotShadowReceiver,
+                    Sheen(root),
+                ))
+                .id();
+            commands.entity(part).add_child(e);
+        }
+    }
+}
+
+/// The gloss highlight: a soft glow off the top left corner, and a slanted streak that is
+/// brighter in some places than others. Drawn in the middle `SHEEN_SPAN` of the texture and
+/// faded out before its edges.
+fn sheen_image() -> Image {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let n = 256u32;
+    let pad = (1.0 - SHEEN_SPAN) * 0.5;
+    let mut data = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let (tu, tv) = ((x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32);
+            let (u, v) = ((tu - pad) / SHEEN_SPAN, (tv - pad) / SHEEN_SPAN);
+            let corner = (-((u - 0.12).powi(2) + (v - 0.08).powi(2)) / 0.06).exp() * 0.45;
+            let along = u + v * 0.6;
+            let uneven = 0.55 + 0.45 * ((v * 7.0 + 1.3).sin() * (u * 5.0 + 0.4).sin());
+            let streak = (-((along - 0.62).powi(2)) / 0.0035).exp() * 0.5 * uneven;
+            let thin = (-((along - 0.78).powi(2)) / 0.0006).exp() * 0.25 * uneven;
+            // Gone by the texture's edge (the clamped sampler stretches the edge outwards).
+            let edge = (tu.min(1.0 - tu).min(tv).min(1.0 - tv) / 0.06).clamp(0.0, 1.0);
+            let a = ((corner + streak + thin) * edge).min(1.0);
+            data.extend_from_slice(&[255, 255, 255, (a * 255.0) as u8]);
+        }
+    }
+    let mut img = Image::new(
+        Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    img.sampler = bevy::render::texture::ImageSampler::linear();
+    img
+}
+
+/// Two slanted soft white bands, a wide one and a thin one, transparent everywhere else
+/// (including the edges, which the clamped sampler stretches outwards).
+fn shine_image() -> Image {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let n = 128u32;
+    let mut data = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let (u, v) = ((x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32);
+            let s = u + (v - 0.5) * 0.25;
+            let band = |c: f32, w: f32| (1.0 - ((s - c) / w).abs()).max(0.0);
+            let a = (band(0.42, 0.08) * 0.8 + band(0.56, 0.035) * 0.7).min(1.0);
+            data.extend_from_slice(&[255, 255, 255, (a * 255.0) as u8]);
+        }
+    }
+    let mut img = Image::new(
+        Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    img.sampler = bevy::render::texture::ImageSampler::linear();
+    img
 }
 
 /// A known spine image to put on a freshly spawned item.
@@ -2659,6 +3082,12 @@ fn request_backs(
 // Animation
 // ------------------------------------------------------------------------------------------------
 
+/// How far the selected game floats up and down at time `t` (the mirror floor takes it back
+/// out, so the floor stays put and the reflection moves the other way).
+pub fn idle_bob(t: f32, sway: f32) -> f32 {
+    (t * 1.7).sin() * 0.22 * sway
+}
+
 fn animate_items(
     time: Res<Time>,
     mut view: ResMut<ViewState>,
@@ -2673,6 +3102,7 @@ fn animate_items(
 ) {
     let dt = time.delta_seconds().min(0.1);
     let t = time.elapsed_seconds();
+    let mut hover_rest = None;
     let aspect = windows.get_single().map(|w| w.width() / w.height().max(1.0)).unwrap_or(16.0 / 9.0);
     let r = (layouts::window_radius(cfg.display.layout, &view.params, cfg.window_radius(), view.zoom) as f32 - 2.0).max(1.0);
     // Looping: head for the copy of the selection nearest where the view is now, so going
@@ -2687,6 +3117,14 @@ fn animate_items(
         view.focus = target;
     }
     view.spin += dt * cfg.animation.spin.to_radians();
+    // Spin turned off: turn on round to facing front, rather than stopping at whatever angle it had.
+    if cfg.animation.spin == 0.0 && view.spin != 0.0 {
+        let tau = std::f32::consts::TAU;
+        let left = view.spin.rem_euclid(tau);
+        let left = if left > std::f32::consts::PI { left - tau } else { left };
+        let step = (dt * 3.0).max(left.abs() * (1.0 - (-dt * 4.0).exp()));
+        view.spin = if left.abs() <= step { 0.0 } else { left - step * left.signum() };
+    }
 
     // The open case: closes when another game is selected; swings over ~0.7 s.
     if view.inspect.is_some() && view.inspect != view.selected_id {
@@ -2702,7 +3140,8 @@ fn animate_items(
         let target = if view.inspect_open { 1.0 } else { 0.0 };
         // Opening follows the motion speed (about half a second by default).
         let step = if view.insert_hold > 0.0 && target == 0.0 { 0.0 } else { dt * cfg.animation.speed.max(0.1) / 0.7 };
-        view.inspect_t = if target > view.inspect_t { (view.inspect_t + step).min(1.0) } else { (view.inspect_t - step).max(0.0) };
+        // At the target it stays put (it used to step back off 1 every other frame: a jitter that grew with low fps).
+        view.inspect_t += (target - view.inspect_t).clamp(-step, step);
         if !view.inspect_open && view.inspect_t <= 0.0 {
             view.inspect = None;
         }
@@ -2853,18 +3292,22 @@ fn animate_items(
         let d = to.length();
         if a > 0.0 && d > 1e-3 {
             let e = a * a * (3.0 - 2.0 * a);
-            pose.pos = cam + to / d * (d + (want - d) * e);
+            // Only ever brought closer: pushed back past its spot it looked smaller than the rest.
+            pose.pos = cam + to / d * (d + (want.min(d) - d) * e);
         }
         if a > 0.0 {
-            pose.pos.y += (t * 1.7).sin() * 0.22 * sway * a;
-            pose.rot = pose.rot * Quat::from_rotation_y((t * 0.9).sin() * 0.05 * sway * a + view.spin * a);
+            pose.pos.y += idle_bob(t, sway) * a;
+            pose.rot = pose.rot * Quat::from_rotation_y((t * 0.9).sin() * 0.05 * sway * a + (view.spin - cfg.display.selected_angle.to_radians()) * a);
         }
         if item.view_index == view.selected && view.turn != Vec2::ZERO {
             // Turned by the user: around the item's own axes, so a flip shows the back
             // square on, whatever angle the layout holds the item at.
             pose.rot = pose.rot * Quat::from_rotation_y(view.turn.x) * Quat::from_rotation_x(view.turn.y);
         }
-        if view.hovered == Some(item.view_index) && launch.game.is_none() {
+        // Not on an open case: its spot is set below, but the lift's scale is not, and flickering
+        // hover made the open case jump between two sizes every frame.
+        if view.hovered == Some(item.view_index) && launch.game.is_none() && view.inspect.is_none() {
+            hover_rest = Some((item.view_index, Transform { translation: pose.pos, rotation: pose.rot, scale: Vec3::splat(pose.scale) }));
             if view.hover_spine {
                 // Pulled a little way out of the stack, straight out past its spine, so the
                 // neighbours stay where they are and easy to point at.
@@ -3008,10 +3451,15 @@ fn animate_items(
         }
         // The game under the mouse follows the cursor's lean much more tightly than the
         // layout moves, so sweeping along an edge feels immediate.
-        let hands_on = (view.hovered == Some(item.view_index) && launch.game.is_none())
+        // Not while it is still on its way to a new place, though: a clicked game is under the
+        // mouse, and would skip the "Selection motion" and snap there.
+        // (Never for an open case: its spot moves with every drag and cursor move, and flipping
+        // between the two speeds made it jitter.)
+        let arriving = view.inspect.is_none() && (pose.pos - tf.translation).length() > 3.0;
+        let hands_on = (!arriving && view.hovered == Some(item.view_index) && launch.game.is_none())
             || (item.view_index == view.selected && view.turn != Vec2::ZERO)
             || (view.inspecting() && view.inspect.as_deref() == Some(item.game_id.as_str()) && view.inspect_t >= 1.0)
-            || view.bounce.is_some_and(|(i, at)| i == item.view_index && t - at < 0.6);
+            || (!arriving && view.bounce.is_some_and(|(i, at)| i == item.view_index && t - at < 0.6));
         let k = if hands_on { k_hover } else { kk };
         // "Selection motion": the path a game takes on its way (same speed), strongest when it
         // sets off and gone by the time it arrives.
@@ -3041,6 +3489,7 @@ fn animate_items(
         tf.rotation = if spun { pose.rot } else { tf.rotation.slerp(pose.rot, k) };
         tf.scale = tf.scale.lerp(Vec3::splat(pose.scale), k);
     }
+    view.hover_rest = hover_rest;
 }
 
 /// Keeps the zoom (ctrl + wheel, also inside an open case) in the config, so it is the same
@@ -3603,7 +4052,7 @@ fn update_ui(
             "Drop a game, ROM or folder onto this window, or add [[scan.rom_dirs]] to config.toml and press F5".to_string()
         } else {
             format!(
-                "[{}/{}] browse   [{}] open case   [{}] launch   [{}] flip   [{}/{}] turn   [{}] layout   [{}] style   [{}] background   [{}/{}] platform   [{}] favorite   [{}] search   [{}] settings   [{}] quit\nmouse: drag to move, right-drag to rotate, right-click to flip, click to select, double-click to launch, ctrl+wheel to zoom",
+                "[{}/{}] browse   [{}] open case   [{}] launch   [{}] flip   [{}/{}] turn   [{}] layout   [{}] style   [{}] background   [{}] filters   [{}/{}] platform   [{}] favorite   [{}] search   [{}] settings   [{}] quit\nmouse: drag to move, right-drag to rotate, right-click to flip, click to select, double-click to launch, ctrl+wheel to zoom",
                 first(&k.left),
                 first(&k.right),
                 first(&k.open),
@@ -3614,6 +4063,7 @@ fn update_ui(
                 first(&k.next_layout),
                 first(&k.next_style),
                 first(&k.next_background),
+                first(&k.toggle_filters),
                 first(&k.prev_platform),
                 first(&k.next_platform),
                 first(&k.favorite),
@@ -3727,17 +4177,179 @@ fn save_on_exit(mut exits: EventReader<AppExit>, mut persist: ResMut<Persist>, l
 }
 
 pub fn winit_settings(cfg: &Config, overlay: bool) -> bevy::winit::WinitSettings {
-    // The overlay sits over other apps, which usually have the focus, so it has to keep
-    // drawing (it quits as soon as a game starts).
-    if overlay {
+    // The overlay sits over other apps, which may have the focus when it starts, so it keeps
+    // drawing until it has had the focus and lost it again (or a game starts): see `ASLEEP`.
+    if overlay && !ASLEEP.load(std::sync::atomic::Ordering::Relaxed) {
         return bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode: bevy::winit::UpdateMode::Continuous };
     }
     let fps = cfg.general.background_fps;
     let wait = if fps > 0.0 { std::time::Duration::from_secs_f32(1.0 / fps) } else { std::time::Duration::from_secs(3600) };
+    // Controllers do not wake a sleeping app. Normally `start_home_watch` wakes it when the home
+    // button is pressed; without that thread, look for the button a few times a second instead.
+    let watched = HOME_WATCH.load(std::sync::atomic::Ordering::Relaxed);
+    let wait = if cfg.general.home_button && !watched { wait.min(std::time::Duration::from_millis(200)) } else { wait };
+    // Once asleep, only the focus coming back (which Bevy always reacts to), the home button (a
+    // user event) or `background_fps` wake it: not the mouse passing over the window or any other
+    // window event, so in the background it costs nothing at all. (Before that, window events
+    // still count: a window that starts without the focus needs them to show at all.)
+    let asleep = ASLEEP.load(std::sync::atomic::Ordering::Relaxed);
     bevy::winit::WinitSettings {
         focused_mode: bevy::winit::UpdateMode::Continuous,
-        unfocused_mode: bevy::winit::UpdateMode::reactive_low_power(wait),
+        unfocused_mode: bevy::winit::UpdateMode::Reactive { wait, react_to_device_events: false, react_to_user_events: true, react_to_window_events: !asleep },
     }
+}
+
+/// The pad button in the place of Xbox button `t`: with Nintendo labels A and B (and X and Y)
+/// swap places, so A (by its label) still opens and B still closes.
+pub fn face(cfg: &Config, t: GamepadButtonType) -> GamepadButtonType {
+    use GamepadButtonType::*;
+    match (cfg.general.nintendo_buttons, t) {
+        (true, South) => East,
+        (true, East) => South,
+        (true, West) => North,
+        (true, North) => West,
+        _ => t,
+    }
+}
+
+/// Minimized after launching a game, or the focus lost: the overlay stops drawing all the time
+/// until it has the focus again.
+static ASLEEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A thread of its own reads the controllers, so the app can sleep (draw nothing at all) in the
+/// background and still come back on the home button.
+static HOME_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set by that thread when the home button is pressed while the window is not focused.
+static HOME_PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the window lost the focus (ms since the Unix epoch), 0 while it has it. The thread
+/// leaves the button to Bevy while focused, and ignores presses from before the focus went
+/// (the press that minimized the window would otherwise bring it straight back).
+static UNFOCUSED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn epoch_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+#[cfg(feature = "gamepad")]
+fn start_home_watch(
+    proxy: Option<NonSend<bevy::winit::EventLoopProxy<bevy::winit::WakeUp>>>,
+    cfg: Res<Config>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut winit: ResMut<bevy::winit::WinitSettings>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(proxy) = proxy.map(|p| p.clone()) else { return };
+    let Ok(mut pads) = gilrs::Gilrs::new() else { return };
+    // Blocks until the controllers have something to say (no polling).
+    let spawned = std::thread::Builder::new().name("home-button".into()).spawn(move || loop {
+        let Some(ev) = pads.next_event_blocking(None) else { continue };
+        let since = UNFOCUSED_AT.load(Relaxed);
+        if matches!(ev.event, gilrs::EventType::ButtonPressed(gilrs::Button::Mode, _)) && since != 0 && epoch_ms(ev.time) > since {
+            HOME_PRESSED.store(true, Relaxed);
+            let _ = proxy.send_event(bevy::winit::WakeUp);
+        }
+    });
+    if spawned.is_ok() {
+        HOME_WATCH.store(true, Relaxed);
+        *winit = winit_settings(&cfg, windows.get_single().is_ok_and(|w| w.transparent));
+    }
+}
+
+#[cfg(not(feature = "gamepad"))]
+fn start_home_watch() {}
+
+/// The controller's home button brings the window back to the front, minimized or not.
+/// (Also wakes the overlay up again once it has the focus back after a launch.)
+fn home_button(
+    cfg: Res<Config>,
+    buttons: Res<ButtonInput<GamepadButton>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut winit: ResMut<bevy::winit::WinitSettings>,
+    mut was: Local<(bool, bool)>,
+    mut exit: EventWriter<AppExit>,
+    mut focus_events: EventReader<bevy::window::WindowFocused>,
+    mut had_focus: Local<bool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    // Lost the focus (alt-tab, the taskbar, clicking another window): rest, so it costs a game
+    // in front of it nothing. Only real focus changes from the system count: Bevy's window
+    // starts out marked focused before it has ever had the focus.
+    for ev in focus_events.read() {
+        if ev.focused {
+            *had_focus = true;
+        } else if *had_focus {
+            ASLEEP.store(true, Relaxed);
+        }
+    }
+    if let Ok(w) = windows.get_single() {
+        // Asleep once the focus has gone, awake when it comes back.
+        if ASLEEP.load(Relaxed) && w.focused && !was.1 {
+            ASLEEP.store(false, Relaxed);
+        }
+        let asleep = ASLEEP.load(Relaxed);
+        if asleep != was.0 {
+            *winit = winit_settings(&cfg, w.transparent);
+        }
+        *was = (asleep, w.focused);
+        if w.focused {
+            UNFOCUSED_AT.store(0, Relaxed);
+        } else if UNFOCUSED_AT.load(Relaxed) == 0 {
+            UNFOCUSED_AT.store(epoch_ms(std::time::SystemTime::now()), Relaxed);
+        }
+    }
+    let woken = HOME_PRESSED.swap(false, Relaxed);
+    if !cfg.general.home_button || !(woken || buttons.get_just_pressed().any(|b| b.button_type == GamepadButtonType::Mode)) {
+        return;
+    }
+    if let Ok(mut w) = windows.get_single_mut() {
+        // In front already: put it away, as after launching a game (closed if that is the
+        // setting, minimized otherwise).
+        if w.focused {
+            if cfg.general.close_on_launch {
+                exit.send(AppExit::Success);
+            } else {
+                w.set_minimized(true);
+                ASLEEP.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return;
+        }
+        w.set_minimized(false);
+        // Bevy asks the system for the focus when this turns true.
+        w.focused = true;
+    }
+    // KDE on Wayland ignores both from an app; its window manager is asked instead.
+    let kde = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE")) && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if kde {
+        std::thread::spawn(kwin_raise);
+    }
+}
+
+/// Un-minimizes and focuses this process's window through a short KWin script (over D-Bus).
+fn kwin_raise() {
+    let path = std::env::temp_dir().join(format!("slipcase-raise-{}.js", std::process::id()));
+    let js = format!("for (const w of workspace.windowList()) {{ if (w.pid === {}) {{ w.minimized = false; workspace.activeWindow = w; }} }}", std::process::id());
+    if std::fs::write(&path, js).is_err() {
+        return;
+    }
+    let call = |args: &[&str]| {
+        std::process::Command::new("dbus-send")
+            .args(["--session", "--print-reply", "--dest=org.kde.KWin"])
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let name = "string:slipcase-raise";
+    call(&["/Scripting", "org.kde.kwin.Scripting.unloadScript", name]);
+    // The reply ends with the script's id ("int32 3"), which names its object to run.
+    let id = call(&["/Scripting", "org.kde.kwin.Scripting.loadScript", &format!("string:{}", path.display()), name])
+        .and_then(|r| r.split_whitespace().last().and_then(|n| n.parse::<i32>().ok()))
+        .filter(|id| *id >= 0);
+    if let Some(id) = id {
+        call(&[&format!("/Scripting/Script{id}"), "org.kde.kwin.Script.run"]);
+    }
+    call(&["/Scripting", "org.kde.kwin.Scripting.unloadScript", name]);
+    let _ = std::fs::remove_file(&path);
 }
 
 // Re-exported so main.rs does not need to know about internals.

@@ -20,9 +20,13 @@ mod settings;
 mod textedit;
 mod toss;
 mod record;
+mod mirror;
+mod filters;
+mod fps;
+mod fonts;
 
 use bevy::prelude::*;
-use bevy::window::{CompositeAlphaMode, PresentMode, WindowMode, WindowPosition};
+use bevy::window::{CompositeAlphaMode, WindowMode, WindowPosition};
 
 use config::Config;
 use library::Library;
@@ -155,8 +159,11 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Slipcase".into(),
+                // The app id on Wayland (where windows take their icon from the matching
+                // slipcase.desktop) and the class on X11.
+                name: Some("slipcase".into()),
                 resolution: (cfg.general.window_width, cfg.general.window_height).into(),
-                present_mode: if cfg.general.vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync },
+                present_mode: app::present_mode(&cfg),
                 // Always start as a normal window on the screen with the mouse: Bevy would put a
                 // window that starts fullscreen on the primary screen. `app::place_window` goes
                 // fullscreen (or maximises the overlay) a moment later, on whichever screen it is on.
@@ -177,6 +184,11 @@ fn main() {
         .insert_resource(app::winit_settings(&cfg, overlay))
         .add_plugins(background::BackgroundPlugin)
         .add_plugins(render::DiscMaterialPlugin)
+        .add_plugins(mirror::MirrorPlugin)
+        .add_plugins(filters::FiltersPlugin)
+        .add_plugins(fps::FpsPlugin)
+        .add_plugins(fonts::FontsPlugin)
+        .add_systems(Update, set_window_icon)
         .insert_resource(app::initial_msaa(&cfg))
         .insert_resource(ClearColor(if overlay { Color::NONE } else { Color::BLACK }))
         .insert_resource(app::Overlay(overlay))
@@ -193,3 +205,18 @@ fn main() {
         .run();
 }
 
+
+/// Puts icon.png (shrunk by build.rs) on the window, for the taskbar and title bar. Tries each
+/// frame until the window exists, then never again.
+fn set_window_icon(windows: Option<NonSend<bevy::winit::WinitWindows>>, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let Some(windows) = windows else { return };
+    let Some(window) = windows.windows.values().next() else { return };
+    static RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"));
+    if let Ok(icon) = winit::window::Icon::from_rgba(RGBA.to_vec(), 256, 256) {
+        window.set_window_icon(Some(icon));
+    }
+    *done = true;
+}
