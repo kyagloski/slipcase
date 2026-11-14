@@ -284,9 +284,9 @@ pub fn toss_step(
 
     // The held game follows the cursor across a plane facing the camera, pulled by the spot
     // it was grabbed at (so it hangs and swings from there).
-    let ray = windows.get_single().ok().and_then(|w| w.cursor_position()).and_then(|c| {
+    let ray = windows.get_single().ok().and_then(|w| {
         let (cam, tf) = camera.get_single().ok()?;
-        Some((cam.viewport_to_world(tf, c)?, *tf))
+        Some((cam.viewport_to_world(tf, crate::resolution::view_cursor(w, cam)?)?, *tf))
     });
     for l in toss.loose.values() {
         if l.state != State::Held {
@@ -391,7 +391,7 @@ pub fn toss_step(
         let State::Falling(t) = l.state else { continue };
         let Some(b) = sim.bodies.get(l.body) else { continue };
         let p = to_bevy(b.position()).0;
-        let on_screen = view.and_then(|(cam, tf)| cam.world_to_viewport(tf, p)).is_some_and(|v| v.cmpge(-size * 0.25).all() && v.cmple(size * 1.25).all());
+        let on_screen = view.and_then(|(cam, tf)| Some((cam.world_to_viewport(tf, p)?, cam.logical_viewport_size().unwrap_or(size)))).is_some_and(|(v, size)| v.cmpge(-size * 0.25).all() && v.cmple(size * 1.25).all());
         if !on_screen || now - t > MAX_FALL {
             fallen.push(id.clone());
         } else if now - t > SOLID_TIME {

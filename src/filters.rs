@@ -4,6 +4,7 @@
 //! each); with none on, the camera has no `FilterSettings` and the pass does not run.
 
 use bevy::asset::load_internal_asset;
+use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state;
 use bevy::ecs::query::QueryItem;
@@ -17,7 +18,7 @@ use bevy::render::texture::BevyDefault;
 use bevy::render::view::ViewTarget;
 use bevy::render::RenderApp;
 
-use crate::app::MainCamera;
+use crate::app::{BgCamera, MainCamera};
 use crate::config::Config;
 
 const SHADER: Handle<Shader> = Handle::weak_from_u128(0x5eed_c0de_b4c6_41d0_9a53_1c0ffee00f17);
@@ -42,6 +43,10 @@ pub struct FilterSettings {
     time: f32,
     strength: f32,
     lines: f32,
+    frame: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
 }
 
 pub struct FiltersPlugin;
@@ -58,7 +63,10 @@ impl Plugin for FiltersPlugin {
             .add_render_graph_node::<ViewNodeRunner<FilterNode<false>>>(Core3d, FilterLabel)
             .add_render_graph_edges(Core3d, (Node3d::Tonemapping, FilterLabel, Node3d::EndMainPassPostProcessing))
             .add_render_graph_node::<ViewNodeRunner<FilterNode<true>>>(Core3d, FilterOverUiLabel)
-            .add_render_graph_edges(Core3d, (bevy::ui::graph::NodeUi::UiPass, FilterOverUiLabel, Node3d::Upscaling));
+            .add_render_graph_edges(Core3d, (bevy::ui::graph::NodeUi::UiPass, FilterOverUiLabel, Node3d::Upscaling))
+            // "Only on the background": the background's own 2D camera, before the games are drawn over it.
+            .add_render_graph_node::<ViewNodeRunner<FilterNode<false>>>(Core2d, FilterLabel)
+            .add_render_graph_edges(Core2d, (Node2d::Tonemapping, FilterLabel, Node2d::EndMainPassPostProcessing));
     }
 
     fn finish(&self, app: &mut App) {
@@ -89,12 +97,19 @@ fn flags(cfg: &Config) -> u32 {
     .fold(0, |a, (_, b)| a | b)
 }
 
-/// Puts the settings on the main camera while any filter is on (and takes them off when none
-/// is), updating them in place from then on.
-fn sync_filters(mut commands: Commands, cfg: Res<Config>, time: Res<Time>, mut cams: Query<(Entity, Option<&mut FilterSettings>), With<MainCamera>>) {
+/// Puts the settings on the main camera (or the background's, for "only on the background")
+/// while any filter is on (and takes them off when none is), updating them in place from then on.
+#[allow(clippy::type_complexity)]
+fn sync_filters(
+    mut commands: Commands,
+    cfg: Res<Config>,
+    time: Res<Time>,
+    mut cams: Query<(Entity, Option<&mut FilterSettings>, Has<BgCamera>), Or<(With<MainCamera>, With<BgCamera>)>>,
+) {
     let flags = flags(&cfg);
-    for (e, cur) in &mut cams {
-        if flags == 0 {
+    let bg_only = cfg.filters.background_only;
+    for (e, cur, is_bg) in &mut cams {
+        if flags == 0 || is_bg != bg_only {
             if cur.is_some() {
                 commands.entity(e).remove::<FilterSettings>();
             }
@@ -108,10 +123,12 @@ fn sync_filters(mut commands: Commands, cfg: Res<Config>, time: Res<Time>, mut c
             _ => 0,
         };
         let s = FilterSettings {
-            flags: flags | tint << 16 | if cfg.filters.cover_menus { OVER_UI } else { 0 },
+            flags: flags | tint << 16 | if cfg.filters.cover_menus && !bg_only { OVER_UI } else { 0 },
             time: time.elapsed_seconds_wrapped(),
             strength: cfg.filters.strength.clamp(0.0, 3.0),
             lines: cfg.filters.retro_lines.clamp(60.0, 2160.0),
+            frame: cfg.filters.crt_frame.clamp(0.0, 1.0),
+            ..default()
         };
         match cur {
             Some(mut cur) => *cur = s,

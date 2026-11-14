@@ -465,8 +465,11 @@ fn update_background(
     mask: Option<Res<MaskState>>,
     mut mask_mats: ResMut<Assets<MaskMaterial>>,
     overlay: Res<crate::app::Overlay>,
+    mut clock: Local<f32>,
 ) {
     let dt = time.delta_seconds();
+    // Seconds of animation so far, at the background's animation speed.
+    *clock = (*clock + dt * cfg.background.speed.max(0.0)) % 86400.0;
     let k = 1.0 - (-dt * cfg.background.blend_speed).exp();
     for i in 0..3 {
         let t = bg.target[i];
@@ -496,12 +499,13 @@ fn update_background(
     }
     if let Some(m) = mats.get_mut(&bg.handle) {
         m.params.time = time.elapsed_seconds();
-        // Seconds of the day (UTC), counting on from start: the PS2 style's orbs follow the clock.
+        // Seconds of the day (UTC) at start, counting on at the animation speed: the PS2 style's
+        // orbs follow the clock.
         static DAY_START: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
         let day = *DAY_START.get_or_init(|| {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| (d.as_secs() % 86400) as f32 + d.subsec_millis() as f32 / 1000.0).unwrap_or(0.0)
         });
-        m.params.pad0 = (day + time.elapsed_seconds()) % 86400.0;
+        m.params.pad0 = (day + *clock) % 86400.0;
         if cfg.background.style == BackgroundStyle::Ps2 {
             let (pts, boxes) = ps2_orbs(m.params.pad0, w / h);
             m.params.orbs = pts;

@@ -80,7 +80,7 @@ rows of spines and more. **Tab** flips between them, and the list can loop forev
 
 ### 🌌 Backgrounds with attitude
 
-A neon synthwave grid, a cosmic web, northern lights, the PS2 menu's orbs, the original Xbox's green
+A neon synthwave grid, a pixel-art landscape, a cosmic web, northern lights, the PS2 menu's orbs, the original Xbox's green
 glow, blurred game art, or a picture or GIF of your own. Let them pick up the colours of whatever game
 you're on, or set your own palette with the colour picker.
 

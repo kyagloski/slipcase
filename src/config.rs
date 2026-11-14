@@ -158,12 +158,14 @@ pub enum BackgroundStyle {
     Ps2,
     /// Like the original Xbox dashboard: green smoke, a glowing orb and tubes.
     Xbox,
+    /// A pixel-art 2D sandbox world at sunset: rolling clouds, trees and grass in the wind, blowing leaves.
+    Pixel,
     /// A picture or animated GIF of your own (`background.custom_path`).
     Custom,
 }
 
 impl BackgroundStyle {
-    pub const ALL: [BackgroundStyle; 11] = [
+    pub const ALL: [BackgroundStyle; 12] = [
         BackgroundStyle::GameArt,
         BackgroundStyle::Aurora,
         BackgroundStyle::Waves,
@@ -174,6 +176,7 @@ impl BackgroundStyle {
         BackgroundStyle::Galactic,
         BackgroundStyle::Ps2,
         BackgroundStyle::Xbox,
+        BackgroundStyle::Pixel,
         BackgroundStyle::Custom,
     ];
     /// Style number used by the background shader.
@@ -190,6 +193,7 @@ impl BackgroundStyle {
             BackgroundStyle::Galactic => 6.0,
             BackgroundStyle::Ps2 => 7.0,
             BackgroundStyle::Xbox => 8.0,
+            BackgroundStyle::Pixel => 9.0,
             // Behind the picture (while it loads, or if it cannot be read): the solid colour.
             BackgroundStyle::Custom => 4.0,
         }
@@ -206,6 +210,7 @@ impl BackgroundStyle {
             BackgroundStyle::Galactic => "Galactic",
             BackgroundStyle::Ps2 => "PS2",
             BackgroundStyle::Xbox => "Xbox",
+            BackgroundStyle::Pixel => "Pixel",
             BackgroundStyle::Custom => "Custom image",
         }
     }
@@ -251,6 +256,9 @@ pub struct General {
     pub show_hints: bool,
     /// Frames per second and frame time in the top left corner.
     pub show_fps: bool,
+    /// The games and background drawn at this percentage of the window's resolution and
+    /// stretched to fit (lower: faster; higher: sharper). The on-screen text stays sharp.
+    pub render_resolution: f32,
     pub show_info: bool,
     /// The line under the title: platform, year, genres, plays.
     pub show_details: bool,
@@ -293,6 +301,7 @@ impl Default for General {
             last_game: String::new(),
             show_hints: true,
             show_fps: false,
+            render_resolution: 100.0,
             show_info: true,
             show_details: true,
             bloom: true,
@@ -483,6 +492,8 @@ pub struct Filters {
     pub crt: bool,
     /// The CRT's phosphor: `colour`, `amber`, `green` or `white` (one colour, like a terminal).
     pub crt_colour: String,
+    /// How solid the CRT's frame round the curved glass is (0 = see-through, 1 = solid).
+    pub crt_frame: f32,
     /// Big square pixels and 15-bit colour, like a 16-bit console.
     pub pixelate: bool,
     /// 256 colours (3-3-2 bits) with ordered dithering, like 8-bit hardware.
@@ -506,6 +517,8 @@ pub struct Filters {
     /// The filters also cover the on-screen text: titles, info, hints, buttons (never the
     /// settings, which stay readable).
     pub cover_menus: bool,
+    /// The filters cover only the animated background; the games and text stay clean.
+    pub background_only: bool,
 }
 
 impl Default for Filters {
@@ -514,6 +527,7 @@ impl Default for Filters {
             enabled: true,
             crt: false,
             crt_colour: "colour".into(),
+            crt_frame: 1.0,
             pixelate: false,
             posterize: false,
             game_boy: false,
@@ -526,6 +540,7 @@ impl Default for Filters {
             retro_lines: 240.0,
             strength: 1.0,
             cover_menus: false,
+            background_only: false,
         }
     }
 }

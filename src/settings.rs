@@ -187,6 +187,8 @@ const CASE_COLORS: [(&str, &str); 11] = [
 /// The cover download settings, a group inside "Cases and discs".
 const SUB_COVERS: &str = "Covers";
 const SUB_FILTERS: &str = "Filters";
+/// Every group name (see `Kind::Sub`); an `Advanced` row for anything else belongs to a category.
+const SUBS: [&str; 2] = [SUB_COVERS, SUB_FILTERS];
 
 /// Every named category header (the ones that can be folded).
 fn category_headers() -> Vec<&'static str> {
@@ -272,12 +274,7 @@ fn entries() -> Vec<Entry> {
         adv(toggle!("Same size for every case", display.uniform_sizes, Effect::Respawn)),
         adv(num!("Mouse sensitivity", display.mouse_sensitivity, 0.1, 4.0, 0.1, Effect::None)),
         options!("Highlight", display.highlight, ["outline", "glow", "both", "none"], Effect::None),
-        options!(
-            "Highlight colour",
-            display.highlight_color,
-            ["#2f8cff", "#00d0ff", "#ffffff", "#3ddc84", "#ffc531", "#ff4f6d", "#b36bff"],
-            Effect::None
-        ),
+        color!("Highlight colour", display.highlight_color),
         adv(num!("Highlight width (cm)", display.highlight_width, 0.04, 1.0, 0.02, Effect::Respawn)),
         toggle!("Show key hints", general.show_hints, Effect::None),
         toggle!("Show description", general.show_info, Effect::None),
@@ -366,17 +363,20 @@ fn entries() -> Vec<Entry> {
         adv(toggle!("Adaptive sync (with vsync)", general.adaptive_sync, Effect::Window)),
         toggle!("Potato mode (much faster, plainer looks)", general.potato, Effect::Potato),
         num!("Brightness", general.brightness, 0.2, 3.0, 0.05, Effect::None),
+        num!("Render resolution (%)", general.render_resolution, 25.0, 200.0, 5.0, Effect::None),
         num!("UI scale", general.ui_scale, 0.5, 2.0, 0.05, Effect::UiScale),
         options!("Font", general.font, ["default", "minecraft", "arcade", "terminal", "tiny pixel", "sci-fi", "retro future", "signage"], Effect::None),
         toggle!("Show FPS", general.show_fps, Effect::None),
+        toggle!("Filters on (all the ticked ones in Filters; X)", filters.enabled, Effect::None),
         adv(toggle!("Shadows", general.shadows, Effect::None)),
         adv(num!("FPS in background (0 = paused)", general.background_fps, 0.0, 30.0, 1.0, Effect::Window)),
         // Screen filters, as a group of their own; any number can be on at once.
         Entry { label: SUB_FILTERS, kind: Kind::Sub(SUB_FILTERS), effect: Effect::None, advanced: false },
-        toggle!("Filters on (all the ticked ones below; X)", filters.enabled, Effect::None),
         toggle!("Filters cover on-screen text too", filters.cover_menus, Effect::None),
+        toggle!("Filters only on the background", filters.background_only, Effect::None),
         toggle!("CRT television", filters.crt, Effect::None),
         options!("CRT colour", filters.crt_colour, ["colour", "amber", "green", "white"], Effect::None),
+        num!("CRT frame opacity", filters.crt_frame, 0.0, 1.0, 0.05, Effect::None),
         toggle!("Pixelated (16-bit)", filters.pixelate, Effect::None),
         toggle!("256 colours (8-bit)", filters.posterize, Effect::None),
         toggle!("Game Boy screen", filters.game_boy, Effect::None),
@@ -443,6 +443,8 @@ pub struct Menu {
     remove_row: bool,
     /// Remove was pressed once for this game: a second press before the time removes it.
     remove_armed: Option<(String, std::time::Instant)>,
+    /// Hide was pressed once for this game: a second press before the time hides it.
+    hide_armed: Option<(String, std::time::Instant)>,
     /// The number setting (entry index) whose slider is being dragged.
     slider_drag: Option<usize>,
     /// Groups inside categories that are open (see `Kind::Sub`).
@@ -503,6 +505,7 @@ impl Default for Menu {
             proton_rows: false,
             remove_row: false,
             remove_armed: None,
+            hide_armed: None,
             expanded: Vec::new(),
             // Every category starts folded.
             collapsed: category_headers(),
@@ -694,7 +697,9 @@ fn measure_picked_font(cfg: Res<Config>, mut fonts: ResMut<MenuFonts>, mut appli
 }
 
 /// Draws the settings windows (panel, dialogs, pickers) after the screen filters, so they stay
-/// readable even with "Filters cover on-screen text too". Only on while one of them is open.
+/// readable even with "Filters cover on-screen text too". Only on while one of them is open,
+/// or while the filters cover the on-screen text: the gear and the controls chart's icon are
+/// then drawn here too, so the CRT curve never moves them away from where they are clicked.
 #[derive(Component)]
 struct MenuCamera;
 
@@ -703,7 +708,9 @@ fn menu_camera(
     mut commands: Commands,
     main: Query<&Camera, (With<crate::app::MainCamera>, Without<MenuCamera>)>,
     mut cam: Query<(Entity, &mut Camera), With<MenuCamera>>,
-    roots: Query<(Entity, &Style, Option<&TargetCamera>), Or<(With<MenuPanel>, With<RestartPrompt>, With<EditDialog>, With<PickLayer>, With<ArtLayer>)>>,
+    roots: Query<(Entity, &Style, Option<&TargetCamera>), Or<(With<MenuPanel>, With<RestartPrompt>, With<EditDialog>, With<PickLayer>, With<ArtLayer>, With<crate::controls::ControlsLayer>)>>,
+    gear: Query<(Entity, Option<&TargetCamera>), Or<(With<crate::app::GearButton>, With<crate::controls::ControlsButton>)>>,
+    cfg: Res<Config>,
 ) {
     let Ok(main) = main.get_single() else { return };
     let Ok((id, mut c)) = cam.get_single_mut() else {
@@ -711,7 +718,7 @@ fn menu_camera(
         // picture and this one draws over it.
         commands.spawn((
             Camera2dBundle {
-                camera: Camera { order: 1, hdr: main.hdr, is_active: false, clear_color: ClearColorConfig::None, ..default() },
+                camera: Camera { order: 2, hdr: main.hdr, is_active: false, clear_color: ClearColorConfig::None, ..default() },
                 tonemapping: bevy::core_pipeline::tonemapping::Tonemapping::None,
                 deband_dither: bevy::core_pipeline::tonemapping::DebandDither::Disabled,
                 ..default()
@@ -729,8 +736,17 @@ fn menu_camera(
         }
         open |= style.display != Display::None;
     }
-    if c.is_active != open {
-        c.is_active = open;
+    let active = open || (cfg.filters.enabled && cfg.filters.cover_menus && !cfg.filters.background_only);
+    for (e, target) in &gear {
+        let on_menu = target.map(|t| t.entity()) == Some(id);
+        if active && !on_menu {
+            commands.entity(e).insert(TargetCamera(id));
+        } else if !active && on_menu {
+            commands.entity(e).remove::<TargetCamera>();
+        }
+    }
+    if c.is_active != active {
+        c.is_active = active;
     }
     if c.hdr != main.hdr {
         c.hdr = main.hdr;
@@ -1378,6 +1394,11 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
             }
         }
         Kind::Source(s) => if cfg.covers.sources.iter().any(|x| x == s) { "On" } else { "Off" }.into(),
+        Kind::Act(Act::HideGame)
+            if menu.hide_armed.as_ref().is_some_and(|(a, at)| game.is_some_and(|g| &g.id == a) && at.elapsed().as_secs_f32() < RESET_CONFIRM_SECS) =>
+        {
+            "Confirm?".into()
+        }
         Kind::Act(_) => ">".into(),
         Kind::RomPlatform => menu.rom_platform.map_or("guess from files", |p| p.display_name()).to_string(),
         Kind::GameTitle => game.map(|g| crate::render::truncate(&g.title, 26)).unwrap_or_default(),
@@ -1490,7 +1511,9 @@ fn draw_menu(
             style.margin.top = top;
         }
         // Rows inside a group (after a `Kind::Sub` row, before the next heading) one step further.
-        let in_sub = !heading && menu.entries[..i.min(menu.entries.len())].iter().rev().take_while(|e| !matches!(e.kind, Kind::Header)).any(|e| matches!(e.kind, Kind::Sub(_)));
+        // A category's own "Advanced" row comes after its groups and ends them.
+        let ends_sub = |x: &Entry| matches!(x.kind, Kind::Header) || matches!(x.kind, Kind::Advanced(h) if !SUBS.contains(&h));
+        let in_sub = !e.is_some_and(ends_sub) && menu.entries[..i.min(menu.entries.len())].iter().rev().take_while(|x| !ends_sub(x)).any(|x| matches!(x.kind, Kind::Sub(_)));
         let steps = e.is_some_and(|e| e.advanced) as u8 + in_sub as u8;
         let left = Val::Px(10.0 + 16.0 * steps as f32);
         if style.padding.left != left {
@@ -2040,7 +2063,13 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 }
             }
             Act::HideGame => {
-                if let Some(g) = game_id.as_ref().and_then(|id| ctx.lib.find_mut(id)) {
+                let Some(id) = game_id else { return };
+                let armed = menu.hide_armed.take().is_some_and(|(a, at)| a == id && at.elapsed().as_secs_f32() < RESET_CONFIRM_SECS);
+                if !armed {
+                    let title = ctx.lib.find(&id).map(|g| g.title.clone()).unwrap_or_default();
+                    menu.hide_armed = Some((id, std::time::Instant::now()));
+                    ctx.toast.show(format!("Press again to hide {title}"));
+                } else if let Some(g) = ctx.lib.find_mut(&id) {
                     g.hidden = true;
                     let title = g.title.clone();
                     ctx.lib.revision += 1;
@@ -2478,8 +2507,8 @@ fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
         all.extend(hidden_entries(lib, cfg));
         all.extend(tail);
     }
-    // Each category: its everyday settings, then an "Advanced" row, then (when that is open)
-    // the technical ones.
+    // Each category: its everyday settings, its groups, then an "Advanced" row, then (when that
+    // is open) the technical ones.
     let mut list: Vec<Entry> = Vec::new();
     let mut header: &'static str = "";
     let mut held: Vec<Entry> = Vec::new();
@@ -2496,9 +2525,12 @@ fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
     // "Advanced" row of their own, after the group's everyday ones.
     let mut sub: Option<bool> = None;
     let mut category: &'static str = "";
+    // The category's advanced settings, set aside while its groups are listed.
+    let mut cat_held: Vec<Entry> = Vec::new();
     for e in all {
         if matches!(e.kind, Kind::Header) {
             flush(&mut list, &mut held, header, &menu.expanded);
+            flush(&mut list, &mut cat_held, category, &menu.expanded);
             header = e.label;
             category = e.label;
             sub = None;
@@ -2506,7 +2538,11 @@ fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
         } else if menu.collapsed.contains(&category) {
             // Folded category: only its header shows.
         } else if let Kind::Sub(name) = e.kind {
-            flush(&mut list, &mut held, header, &menu.expanded);
+            if sub.is_none() {
+                cat_held.append(&mut held);
+            } else {
+                flush(&mut list, &mut held, header, &menu.expanded);
+            }
             header = name;
             sub = Some(menu.open_subs.contains(&name));
             list.push(e);
@@ -2519,6 +2555,7 @@ fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
         }
     }
     flush(&mut list, &mut held, header, &menu.expanded);
+    flush(&mut list, &mut cat_held, category, &menu.expanded);
     menu.entries = list;
     menu.built = Some(lib.revision);
     menu.index = menu.index.min(menu.entries.len() - 1);

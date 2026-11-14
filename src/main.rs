@@ -5,6 +5,7 @@ mod app;
 mod background;
 mod clipboard;
 mod config;
+mod controls;
 mod covers;
 mod cursor;
 mod detect;
@@ -20,6 +21,7 @@ mod settings;
 mod textedit;
 mod toss;
 mod record;
+mod resolution;
 mod mirror;
 mod filters;
 mod fps;
@@ -187,6 +189,8 @@ fn main() {
         .add_plugins(mirror::MirrorPlugin)
         .add_plugins(filters::FiltersPlugin)
         .add_plugins(fps::FpsPlugin)
+        .add_plugins(controls::ControlsPlugin)
+        .add_plugins(resolution::ResolutionPlugin)
         .add_plugins(fonts::FontsPlugin)
         .add_systems(Update, set_window_icon)
         .insert_resource(app::initial_msaa(&cfg))

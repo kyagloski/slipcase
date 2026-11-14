@@ -561,9 +561,9 @@ pub fn egg_drag(
         return;
     }
     let t = egg.t;
-    let ray = windows.get_single().ok().and_then(|w| w.cursor_position()).and_then(|c| {
+    let ray = windows.get_single().ok().and_then(|w| {
         let (cam, tf) = camera.get_single().ok()?;
-        cam.viewport_to_world(tf, c)
+        cam.viewport_to_world(tf, crate::resolution::view_cursor(w, cam)?)
     });
     let egg = &mut *egg;
     let Some(sim) = egg.sim.as_mut() else { return };

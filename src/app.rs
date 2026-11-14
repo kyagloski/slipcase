@@ -291,7 +291,8 @@ impl ViewState {
         self.inspect.is_some() && self.inspect_open
     }
 
-    /// After a free rotation, settle on whichever of the front or back is nearer.
+    /// After a free rotation, settle on whichever of the front or back is nearer (upright again:
+    /// turned head over heels, it rolls on round to the nearest full turn).
     /// Only after a free rotation (drag, flick, stick): quarter turns from Z / C stay put.
     fn snap_turn(&mut self) {
         if !self.free_turned {
@@ -300,7 +301,7 @@ impl ViewState {
         self.free_turned = false;
         let pi = std::f32::consts::PI;
         self.turn_target.x = (self.turn_target.x / pi).round() * pi;
-        self.turn_target.y = 0.0;
+        self.turn_target.y = upright(self.turn_target.y);
     }
 
     pub(crate) fn select(&mut self, i: usize, lib: &Library) {
@@ -473,7 +474,7 @@ struct ShelfDecor;
 pub struct ShelfPaint;
 
 #[derive(Component)]
-struct GearButton;
+pub struct GearButton;
 #[derive(Component)]
 struct UiTop;
 #[derive(Component)]
@@ -496,6 +497,12 @@ struct UiToast;
 /// Running as a borderless, see-through overlay (fixed at startup).
 #[derive(Resource, Clone, Copy)]
 pub struct Overlay(pub bool);
+
+/// The nearest upright pitch: vertical turning is free all the way round, so "level" is the
+/// nearest whole turn rather than 0 (no unwinding the long way back).
+fn upright(y: f32) -> f32 {
+    (y / std::f32::consts::TAU).round() * std::f32::consts::TAU
+}
 
 /// The background layer's 2D camera.
 #[derive(Component)]
@@ -595,6 +602,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(Startup, start_home_watch)
             .add_systems(Update, fit_ui_scale)
             .add_systems(Update, crate::toss::toss_input.before(gather_mouse))
+            .add_systems(Update, crate::controls::controls_input.before(gather_keyboard).before(gather_gamepad).before(crate::toss::toss_input))
             .add_systems(Update, crate::toss::toss_step.after(crate::toss::toss_input).before(animate_items))
             .add_systems(Update, apply_covers.after(apply_spines).before(animate_items))
             .add_systems(Update, crate::egg::egg_input.after(gather_mouse).after(gather_keyboard).after(gather_gamepad).before(handle_actions))
@@ -947,8 +955,9 @@ fn gather_keyboard(
     mut out: ResMut<Actions>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut shift_tap: Local<Option<f32>>,
+    chart: Res<crate::controls::ControlsChart>,
 ) {
-    if view.searching || menu.open || menu.just_closed || menu.art_open() {
+    if view.searching || menu.open || menu.just_closed || menu.art_open() || chart.busy() {
         *shift_tap = None;
         return;
     }
@@ -1034,8 +1043,9 @@ fn gather_gamepad(
     mut out: ResMut<Actions>,
     menu: Res<crate::settings::Menu>,
     cfg: Res<Config>,
+    chart: Res<crate::controls::ControlsChart>,
 ) {
-    if view.searching || menu.open || menu.just_closed {
+    if view.searching || menu.open || menu.just_closed || chart.busy() {
         return;
     }
     let mut stick = 0.0;
@@ -1088,7 +1098,7 @@ fn gather_gamepad(
                 view.inspect_rot.y = (view.inspect_rot.y - ry * dt * 1.2).clamp(-0.8, 0.8);
             } else {
                 view.turn_target.x += rx * dt * 3.5;
-                view.turn_target.y = (view.turn_target.y - ry * dt * 2.5).clamp(-1.3, 1.3);
+                view.turn_target.y -= ry * dt * 2.5;
                 view.free_turned = true;
             }
         }
@@ -1131,6 +1141,8 @@ fn gather_gamepad(
 #[derive(Default)]
 struct Drag {
     button: Option<MouseButton>,
+    /// The window had the focus last frame (see the focus check in `gather_mouse`).
+    was_focused: bool,
     moved: f32,
     accum: Vec2,
     last_click: f32,
@@ -1252,8 +1264,8 @@ pub(crate) fn pick_at(
     items: &Query<(&Item, &GlobalTransform, &InheritedVisibility)>,
     hovered: Option<(usize, Option<Transform>)>,
 ) -> Option<(usize, Vec3, Vec3)> {
-    let cursor = window.cursor_position()?;
     let (cam, cam_tf) = camera.get_single().ok()?;
+    let cursor = crate::resolution::view_cursor(window, cam)?;
     let ray = cam.viewport_to_world(cam_tf, cursor)?;
     let mut best: Option<(f32, usize, Vec3, Vec3)> = None;
     for (item, tf, vis) in items.iter() {
@@ -1361,7 +1373,8 @@ fn inspect_mouse(
     let mut hover = InspectHover::None;
     let Some(id) = view.inspect.clone() else { return };
     if let (Some((item, tf, _)), Ok((cam, cam_tf))) = (items.iter().find(|(i, ..)| i.game_id == id), camera.get_single()) {
-        if let (Some(rig), Some(ray)) = (item.rig.as_ref(), cam.viewport_to_world(cam_tf, cursor)) {
+        let ray = crate::resolution::view_cursor(window, cam).and_then(|c| cam.viewport_to_world(cam_tf, c));
+        if let (Some(rig), Some(ray)) = (item.rig.as_ref(), ray) {
             let inv = tf.affine().inverse();
             let (o, d) = (inv.transform_point3(ray.origin), inv.transform_vector3(*ray.direction));
             let on_plane = |z: f32| (d.z.abs() > 1e-6).then(|| o + d * ((z - o.z) / d.z)).filter(|_| (z - o.z) / d.z > 0.0);
@@ -1404,8 +1417,8 @@ fn inspect_mouse(
 fn over_open_case(view: &ViewState, window: &Window, camera: &Query<(&Camera, &GlobalTransform), With<MainCamera>>, items: &Query<(&Item, &GlobalTransform, &InheritedVisibility)>) -> bool {
     let Some(id) = view.inspect.as_ref() else { return false };
     let Some((item, tf, _)) = items.iter().find(|(i, ..)| i.game_id == *id) else { return false };
-    let (Some(cursor), Ok((cam, cam_tf))) = (window.cursor_position(), camera.get_single()) else { return true };
-    let Some(ray) = cam.viewport_to_world(cam_tf, cursor) else { return true };
+    let Ok((cam, cam_tf)) = camera.get_single() else { return true };
+    let Some(ray) = crate::resolution::view_cursor(window, cam).and_then(|c| cam.viewport_to_world(cam_tf, c)) else { return true };
     let inv = tf.affine().inverse();
     let (o, d) = (inv.transform_point3(ray.origin), inv.transform_vector3(*ray.direction));
     if d.z.abs() < 1e-6 {
@@ -1435,10 +1448,11 @@ fn gather_mouse(
     ui: Query<&Interaction>,
     mut out: ResMut<Actions>,
     menu: Res<crate::settings::Menu>,
-    toss: Res<crate::toss::Toss>,
+    (toss, chart): (Res<crate::toss::Toss>, Res<crate::controls::ControlsChart>),
 ) {
-    // The easter egg has the mouse to itself (dragging cases round its table).
-    if view.egg {
+    // The easter egg has the mouse to itself (dragging cases round its table), and the
+    // controls chart while it is open.
+    if view.egg || chart.busy() {
         wheel.clear();
         motion.clear();
         drag.button = None;
@@ -1497,11 +1511,24 @@ fn gather_mouse(
         }
     }
 
-    let delta: Vec2 = motion.read().map(|m| m.delta).sum();
+    let mut delta: Vec2 = motion.read().map(|m| m.delta).sum();
+    let Ok(window) = windows.get_single() else { return };
+    // Mouse motion comes straight from the device, so it keeps arriving while another window
+    // has the focus. Drop it then, and on the frame the focus comes back, so the click that
+    // brings the window back is not a drag across everything moved meanwhile.
+    let refocused = window.focused && !drag.was_focused;
+    drag.was_focused = window.focused;
+    if !window.focused || refocused {
+        delta = Vec2::ZERO;
+        drag.button = None;
+        drag.coast = Vec2::ZERO;
+        drag.vel = Vec2::ZERO;
+        drag.accum = Vec2::ZERO;
+        view.turning = false;
+    }
     if delta != Vec2::ZERO {
         drag.wheeled = false;
     }
-    let Ok(window) = windows.get_single() else { return };
     if view.inspecting() {
         inspect_mouse(&mut view, &cfg, window, delta, &buttons, &camera, &items, over_ui || closing_click, &mut drag, time.elapsed_seconds(), &mut out);
         return;
@@ -1573,7 +1600,7 @@ fn gather_mouse(
             true => {
                 let dx = delta.x * 0.011 * sens;
                 view.turn_target.x += dx;
-                view.turn_target.y = (view.turn_target.y + delta.y * 0.008 * sens).clamp(-1.3, 1.3);
+                view.turn_target.y += delta.y * 0.008 * sens;
                 // Spin speed for the flick, smoothed over a few frames; holding still kills it.
                 let dt = time.delta_seconds().max(1e-3);
                 view.spin_vel = view.spin_vel * 0.5 + (dx / dt) * 0.5;
@@ -1821,13 +1848,13 @@ fn handle_actions(
                 // Half a turn from the nearest front/back orientation, so it toggles.
                 let half_turns = (view.turn_target.x / std::f32::consts::PI).round();
                 view.turn_target.x = (half_turns + 1.0) * std::f32::consts::PI;
-                view.turn_target.y = 0.0;
+                view.turn_target.y = upright(view.turn_target.y);
             }
             Action::TurnLeft | Action::TurnRight => {
                 let q = std::f32::consts::FRAC_PI_2;
                 let dir = if act == Action::TurnLeft { 1.0 } else { -1.0 };
                 view.turn_target.x = ((view.turn_target.x / q).round() + dir) * q;
-                view.turn_target.y = 0.0;
+                view.turn_target.y = upright(view.turn_target.y);
                 // A deliberate quarter turn: nothing snaps it back.
                 view.free_turned = false;
                 view.spin_vel = 0.0;
@@ -3182,6 +3209,11 @@ fn animate_items(
         let w = tau * view.turn_target.x.signum();
         view.turn_target.x -= w;
         view.turn.x -= w;
+    }
+    if view.turn_target.y.abs() > tau {
+        let w = tau * view.turn_target.y.signum();
+        view.turn_target.y -= w;
+        view.turn.y -= w;
     }
 
     // Wall: follow the selection unless the user dragged the wall somewhere else.

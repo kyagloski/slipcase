@@ -217,25 +217,25 @@ fn vivid(c: vec3<f32>, sat: f32) -> vec3<f32> {
 
 // Outrun: a dusk sky over a glowing grid that rolls towards you (and slides sideways as you
 // browse). Two colour sets from the selected game: its own colour for the grid near you, and
-// that colour turned a third of the way round the wheel (like outrun's pink and cyan) for the
-// horizon, the far grid and the sky. The sky and ground are softer than the grid.
+// a neighbouring shade of it for the horizon, the far grid and the sky, so the whole scene takes
+// on the game's colour. The sky and ground are softer than the grid.
 fn synthwave(uv: vec2<f32>, t: f32) -> vec3<f32> {
     let horizon = 0.5;
     let x = (uv.x - 0.5) * p.aspect;
     let base = vivid(max(p.color_b.rgb, vec3<f32>(0.0)), 1.0);
-    let other = clamp(hue_turn(base, -2.1), vec3<f32>(0.0), vec3<f32>(1.0));
-    let near = vivid(base, 0.85);
-    let farc = vivid(other, 0.72);
-    let haze = vivid(hue_turn(other, 0.25), 0.45);
+    let other = clamp(hue_turn(base, -0.8), vec3<f32>(0.0), vec3<f32>(1.0));
+    let near = vivid(base, 1.0);
+    let farc = vivid(other, 0.95);
+    let haze = vivid(hue_turn(other, 0.2), 0.75);
     var col: vec3<f32>;
     if (uv.y >= horizon) {
         // Sky: a deep, soft shade of the game's colour overhead, the second colour glowing at
         // the horizon, with a few stars.
         let h = (uv.y - horizon) / (1.0 - horizon);
         // (Linear colour: small values are already dark on screen; the sky is near black.)
-        let mid = vivid(hue_turn(other, 0.4), 0.4) * 0.035;
-        let top = vivid(hue_turn(base, 0.3), 0.45) * 0.006;
-        col = mix(haze * 0.22, mid, smoothstep(0.0, 0.18, h));
+        let mid = vivid(hue_turn(base, -0.3), 0.75) * 0.07;
+        let top = vivid(base, 0.8) * 0.014;
+        col = mix(haze * 0.32, mid, smoothstep(0.0, 0.18, h));
         col = mix(col, top, smoothstep(0.25, 0.9, h));
         let sq = vec2<f32>(x, uv.y) * 70.0;
         let s = hash21(floor(sq));
@@ -254,7 +254,7 @@ fn synthwave(uv: vec2<f32>, t: f32) -> vec3<f32> {
         let line = 1.0 - smoothstep(2.4, 4.2, g);
         let glow = exp(-g * 0.45) * 0.18;
         let far = smoothstep(0.0, 0.2, below);
-        let ground = vivid(hue_turn(base, 0.2), 0.4) * 0.004;
+        let ground = vivid(base, 0.75) * 0.012;
         col = mix(haze * 0.12, ground, smoothstep(0.0, 0.08, below));
         // The core is drawn in the colour itself (not added on), so it stays rich instead of
         // blowing out to white; only the glow adds light.
@@ -428,6 +428,413 @@ fn xbox(uv: vec2<f32>, t: f32) -> vec3<f32> {
     return srgb_lin(col);
 }
 
+// Pixel art: a side-on 2D sandbox world at sunset, on a chunky pixel grid (180 rows tall).
+// A banded sunset sky (turned to the selected game's hue when the colours follow the cover),
+// a low sun, three layers of clouds rolling and changing shape, silhouetted mountains, hills
+// and a far forest, then the ground: tall trees bending in the wind gusts, bushes, waving
+// grass and flowers over tiled dirt and stone. Leaves blow across, birds fly over and
+// fireflies come out. Everything scrolls at its own speed (and further as you browse).
+// Colours here are sRGB, converted at the end.
+const PX_ROWS: f32 = 180.0;
+
+// Ground height (in pixel rows) of a layer at world column `wx`.
+fn px_ground(wx: f32, base: f32, amp: f32, scale: f32, seed: f32) -> f32 {
+    let n = vnoise(vec2<f32>(wx / scale, seed)) - 0.5 + 0.4 * (vnoise(vec2<f32>(wx / (scale * 0.35), seed + 5.0)) - 0.5);
+    return floor(base + amp * n);
+}
+
+// Wind at world column `x`: a steady breeze plus gusts that roll across from the left.
+fn px_wind(x: f32, t: f32) -> f32 {
+    let gust = smoothstep(0.45, 0.85, vnoise(vec2<f32>(x * 0.02 - t * 0.5, 3.0)));
+    return 0.45 + 0.2 * sin(t * 0.7) + 1.3 * gust + 0.25 * gust * sin(t * 6.0 + x * 0.3);
+}
+
+// The sunset's colours turned to the game's hue (when following the cover).
+fn px_tint(c: vec3<f32>, turn: f32) -> vec3<f32> {
+    return clamp(hue_turn(c, turn), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// A silhouette layer with round trees on top (the far forest). w = 1 where it covers, 2 on its top edge.
+fn px_far_forest(cell: vec2<f32>, off: f32, t: f32) -> f32 {
+    let wx = cell.x + floor(off);
+    let g = px_ground(wx, 70.0, 16.0, 28.0, 2.0);
+    if (cell.y < g) {
+        return select(1.0, 2.0, cell.y >= g - 1.0);
+    }
+    for (var j = -1; j <= 1; j++) {
+        let b = floor(wx / 9.0) + f32(j);
+        let hb = hash21(vec2<f32>(b, 2.0));
+        let cx = b * 9.0 + 2.0 + floor(fract(hb * 7.3) * 5.0);
+        let gc = px_ground(cx, 70.0, 16.0, 28.0, 2.0);
+        let th = 4.0 + floor(fract(hb * 13.7) * 9.0);
+        if (wx == cx && cell.y < gc + th) {
+            return 1.0;
+        }
+        let r = 3.0 + fract(hb * 3.1) * 2.5;
+        let sway = floor(px_wind(cx, t) * 0.8 + 0.5);
+        let d = vec2<f32>(wx + 0.5, cell.y + 0.5) - vec2<f32>(cx + 0.5 + sway, gc + th + r * 0.5);
+        let l = length(d * vec2<f32>(1.0, 1.2));
+        if (l < r) {
+            return select(1.0, 2.0, l > r - 1.0 && d.y > 0.0);
+        }
+    }
+    return 0.0;
+}
+
+fn px_cloud(cell: vec2<f32>, off: f32, t: f32, stretch: vec2<f32>, seed: f32) -> f32 {
+    let c = (cell + vec2<f32>(floor(off), 0.0)) / PX_ROWS;
+    // Drifting through the noise slowly too, so the clouds change shape as they go.
+    return fbm(vec2<f32>(c.x * stretch.x + seed, c.y * stretch.y + t * 0.02)) + 0.3 * (c.y - 0.6);
+}
+
+// One tall tree's pixel (colour, w = 1 where it covers), in ground coordinates.
+fn px_tree(gx: f32, y: f32, t: f32, sun_side: f32) -> vec4<f32> {
+    for (var j = -1; j <= 1; j++) {
+        let b = floor(gx / 18.0) + f32(j);
+        let hb = hash21(vec2<f32>(b, 5.0));
+        if (hb < 0.4) {
+            continue;
+        }
+        let cx = b * 18.0 + 4.0 + floor(fract(hb * 7.3) * 10.0);
+        let gc = px_ground(cx, 30.0, 10.0, 26.0, 4.0);
+        let th = 22.0 + floor(fract(hb * 13.7) * 22.0);
+        let w = px_wind(cx, t);
+        // The trunk bends more towards the top.
+        let rel = clamp((y - gc) / th, 0.0, 1.0);
+        let off = floor(w * 2.2 * rel * rel + 0.5);
+        let tx = gx - cx - off;
+        if (y >= gc - 1.0 && y < gc + th) {
+            if (tx >= 0.0 && tx <= 2.0) {
+                var bark = select(select(vec3<f32>(0.42, 0.27, 0.16), vec3<f32>(0.33, 0.2, 0.12), tx == 1.0), vec3<f32>(0.24, 0.14, 0.08), tx == 2.0);
+                if (hash21(vec2<f32>(b * 3.0 + tx, floor(y / 3.0))) > 0.8) {
+                    bark *= 0.75;
+                }
+                return vec4<f32>(bark, 1.0);
+            }
+            // Roots spreading at the foot.
+            if (y <= gc && (tx == -1.0 || tx == 3.0)) {
+                return vec4<f32>(0.3, 0.18, 0.1, 1.0);
+            }
+        }
+        // Little leafy branches off the trunk, on alternate sides.
+        for (var k = 0; k < 2; k++) {
+            let by = gc + floor(th * (0.4 + 0.22 * f32(k)));
+            let side = select(-1.0, 1.0, fract(hb * 11.0 + f32(k) * 0.5) > 0.5);
+            let bo = floor(w * 2.2 * ((by - gc) / th) * ((by - gc) / th) + 0.5);
+            let bx = cx + bo + 1.0 + side * 3.0;
+            if (y == by && (gx - bx) * side <= 0.0 && (gx - cx - bo - 1.0) * side > 0.0) {
+                return vec4<f32>(0.33, 0.2, 0.12, 1.0);
+            }
+            let flick = floor(sin(t * 4.0 + hb * 9.0 + f32(k)) * w * 0.6 + 0.5);
+            let d = vec2<f32>(gx + 0.5 - (bx + side * 1.5 + flick), y + 0.5 - (by + 1.0));
+            if (length(d) < 2.6) {
+                return vec4<f32>(select(vec3<f32>(0.16, 0.42, 0.14), vec3<f32>(0.4, 0.62, 0.18), d.x * sun_side > 0.5), 1.0);
+            }
+        }
+        // The crown: three lobes, swaying with the wind and fluttering at the edges.
+        let top_off = floor(w * 2.2 + 0.5);
+        let sway = floor(w * 1.5 + sin(t * 2.3 + hb * 20.0) * (0.5 + 0.5 * w) + 0.5);
+        let r = 6.5 + fract(hb * 3.1) * 3.0;
+        let c0 = vec2<f32>(cx + 1.0 + top_off + sway, gc + th + r * 0.5);
+        let pp = vec2<f32>(gx + 0.5, y + 0.5);
+        let d0 = (pp - c0) * vec2<f32>(1.0, 1.15);
+        let d1 = pp - (c0 + vec2<f32>(-r * 0.75, -r * 0.35));
+        let d2 = pp - (c0 + vec2<f32>(r * 0.75, -r * 0.3));
+        let e = max(max(r - length(d0), r * 0.62 - length(d1)), r * 0.62 - length(d2));
+        if (e > 0.0) {
+            if (e < 1.3 && hash21(cell_key(gx, y, floor(t * 5.0 + hb * 3.0))) > 0.65) {
+                continue;
+            }
+            var c = vec3<f32>(0.18, 0.47, 0.15);
+            let ld = dot(normalize(d0 + vec2<f32>(1e-3)), vec2<f32>(sun_side * 0.8, 0.6));
+            if (ld > 0.45 && e < 3.0) {
+                c = vec3<f32>(0.55, 0.68, 0.22);
+            } else if (ld < -0.35) {
+                c = vec3<f32>(0.1, 0.3, 0.12);
+            }
+            if (hash21(floor(vec2<f32>(gx - sway, y) * 0.5)) > 0.78) {
+                c *= 0.75;
+            }
+            return vec4<f32>(c, 1.0);
+        }
+    }
+    return vec4<f32>(0.0);
+}
+
+fn cell_key(x: f32, y: f32, k: f32) -> vec2<f32> {
+    return vec2<f32>(x + k * 17.0, y - k * 31.0);
+}
+
+fn pixel(uv: vec2<f32>, t: f32) -> vec3<f32> {
+    let cell = floor(vec2<f32>(uv.x * p.aspect, uv.y) * PX_ROWS);
+    let q = (cell + 0.5) / PX_ROWS;
+    let scroll = p.scroll * 8.0;
+
+    // Following the cover: turn the sunset from orange to the game's hue (by how colourful it is).
+    let game = max(p.color_b.rgb, vec3<f32>(0.0));
+    let orange_h = atan2(1.7320508 * (0.55 - 0.25), 2.0 * 1.0 - 0.55 - 0.25);
+    let game_h = atan2(1.7320508 * (game.g - game.b), 2.0 * game.r - game.g - game.b);
+    let gm = max(max(game.r, game.g), max(game.b, 1e-4));
+    let gsat = (gm - min(min(game.r, game.g), game.b)) / gm;
+    let turn = (game_h - orange_h) * clamp(p.pad1, 0.0, 1.0) * smoothstep(0.08, 0.3, gsat);
+
+    let zenith = px_tint(vec3<f32>(0.13, 0.1, 0.32), turn);
+    let high = px_tint(vec3<f32>(0.42, 0.18, 0.45), turn);
+    let low = px_tint(vec3<f32>(0.95, 0.42, 0.32), turn);
+    let glow = px_tint(vec3<f32>(1.0, 0.72, 0.35), turn);
+    let rim = px_tint(vec3<f32>(1.0, 0.62, 0.3), turn);
+
+    // Sky: flat bands, checker-dithered where they meet.
+    let horizon = 0.34;
+    let hy = clamp((q.y - horizon) / (1.0 - horizon), 0.0, 1.0);
+    let bf = hy * 10.0;
+    var band = floor(bf);
+    if (fract(bf) < 0.18 && fract((cell.x + cell.y) * 0.5) < 0.25) {
+        band -= 1.0;
+    }
+    let k = clamp(band / 9.0, 0.0, 1.0);
+    var col = mix(high, zenith, (k - 0.45) / 0.55);
+    if (k < 0.12) {
+        col = mix(glow, low, k / 0.12);
+    } else if (k < 0.45) {
+        col = mix(low, high, (k - 0.12) / 0.33);
+    }
+
+    // A few stars coming out high up.
+    let s = hash21(cell);
+    col = mix(col, vec3<f32>(1.0, 0.95, 0.85), step(0.994, s) * smoothstep(0.75, 0.95, q.y) * step(0.3, fract(t * 0.6 + s * 9.0)));
+
+    // The low sun, with rings of glow round it.
+    let sun = vec2<f32>(p.aspect * 0.64, horizon + 0.07 + 0.01 * sin(t * 0.05));
+    let ds = length(cell + 0.5 - sun * PX_ROWS);
+    if (ds < 15.0) {
+        col = select(px_tint(vec3<f32>(1.0, 0.85, 0.5), turn * 0.6), vec3<f32>(1.0, 0.97, 0.8), ds < 11.0);
+    } else {
+        let ring = floor(ds / 6.0);
+        col = mix(col, glow, clamp(0.5 - ring * 0.08, 0.0, 0.5));
+    }
+
+    // Clouds: thin high streaks, big puffs lit gold underneath (the sun is low) and darker on
+    // top, and small quick ones low down.
+    let sun_dir = normalize(sun * PX_ROWS - (cell + 0.5));
+    let streak_off = t * 0.8 + scroll * 0.15;
+    if (q.y > 0.62 && px_cloud(cell, streak_off, t, vec2<f32>(1.0, 14.0), 3.0) > 0.66) {
+        col = mix(col, mix(high, rim, 0.5), 0.75);
+    }
+    let puff_off = t * 2.4 + scroll * 0.3;
+    if (q.y > 0.45 && px_cloud(cell, puff_off, t, vec2<f32>(2.2, 4.0), 0.0) > 0.6) {
+        let lit = px_cloud(cell + floor(sun_dir * 2.5 + 0.5), puff_off, t, vec2<f32>(2.2, 4.0), 0.0) <= 0.6;
+        let top = px_cloud(cell + vec2<f32>(0.0, 2.0), puff_off, t, vec2<f32>(2.2, 4.0), 0.0) <= 0.6;
+        var cc = mix(high, low, 0.45);
+        if (lit) {
+            cc = rim;
+        } else if (top) {
+            cc = mix(high, zenith, 0.4);
+        }
+        col = cc;
+    }
+    let low_off = t * 4.4 + scroll * 0.4;
+    if (q.y > 0.36 && q.y < 0.55 && px_cloud(cell, low_off, t, vec2<f32>(3.0, 7.0), 7.0) > 0.66) {
+        col = mix(low, rim, 0.4);
+    }
+
+    // Birds: dark wings flapping across the sunset.
+    for (var b = 0; b < 5; b++) {
+        let fb = f32(b);
+        let hk = hash21(vec2<f32>(fb, 3.0));
+        let bx = fract(t * (0.015 + 0.012 * hk) + hk) * (p.aspect + 0.4) - 0.2;
+        let by = 0.58 + 0.3 * fract(hk * 5.3) + 0.02 * sin(t * 0.8 + fb);
+        let rel = cell - floor(vec2<f32>(bx, by) * PX_ROWS);
+        let ax = abs(rel.x);
+        let up = fract(t * 3.0 + hk) < 0.5;
+        if (ax <= 2.0 && select(rel.y == -floor(ax / 2.0), rel.y == ax, up)) {
+            col = vec3<f32>(0.12, 0.06, 0.12);
+        }
+    }
+
+    // Silhouettes, far to near, hazier towards the sun.
+    let haze = exp(-length(q - sun) * 2.5);
+    let mx = cell.x + floor(t * 0.3 + scroll * 0.1);
+    let mh = px_ground(mx, 88.0, 60.0, 50.0, 1.0);
+    if (cell.y < mh) {
+        col = mix(mix(vec3<f32>(0.32, 0.18, 0.36), low, 0.35), glow, haze * 0.35);
+        if (cell.y >= mh - 1.0) {
+            col = mix(col, rim, 0.5);
+        }
+    }
+    let hx = cell.x + floor(t * 0.8 + scroll * 0.25);
+    let hh = px_ground(hx, 66.0, 30.0, 34.0, 6.0);
+    if (cell.y < hh) {
+        col = mix(mix(vec3<f32>(0.2, 0.1, 0.25), high, 0.2), glow, haze * 0.2);
+        if (cell.y >= hh - 1.0) {
+            col = mix(col, rim, 0.45);
+        }
+    }
+    let ff = px_far_forest(cell, t * 1.8 + scroll * 0.5, t);
+    if (ff > 0.0) {
+        col = mix(vec3<f32>(0.11, 0.07, 0.14), glow, haze * 0.12);
+        if (ff > 1.5) {
+            col = mix(col, rim, 0.35);
+        }
+    }
+
+    // The ground layer: trees, then the ground, then grass, all in world columns.
+    let light = mix(vec3<f32>(1.0), low, 0.3) * 0.9;
+    let gx = cell.x + floor(t * 4.8 + scroll * 2.0);
+    let y = cell.y;
+    let gh = px_ground(gx, 30.0, 10.0, 26.0, 4.0);
+    let sun_side = select(-1.0, 1.0, q.x < sun.x);
+    let tree = px_tree(gx, y, t, sun_side);
+    if (tree.w > 0.0) {
+        col = tree.xyz * light;
+    }
+
+    // Bushes: leafy mounds on the ground.
+    for (var j = -1; j <= 1; j++) {
+        let bb = floor(gx / 13.0) + f32(j);
+        let hb = hash21(vec2<f32>(bb, 8.0));
+        if (hb > 0.45) {
+            let bx = bb * 13.0 + 3.0 + floor(fract(hb * 5.7) * 7.0);
+            let bg = px_ground(bx, 30.0, 10.0, 26.0, 4.0);
+            let br = 3.0 + fract(hb * 9.1) * 2.5;
+            let sw = floor(px_wind(bx, t) * 0.7 + 0.5);
+            let d = vec2<f32>(gx + 0.5 - bx - sw * step(bg + 2.0, y), y + 0.5 - bg) * vec2<f32>(0.8, 1.3);
+            if (y >= bg && length(d) < br) {
+                var c = select(vec3<f32>(0.14, 0.38, 0.12), vec3<f32>(0.42, 0.6, 0.18), d.y > br * 0.5 && d.x * sun_side > -0.5);
+                if (hash21(vec2<f32>(gx, y) + bb) > 0.93) {
+                    c = vec3<f32>(0.85, 0.25, 0.35);
+                }
+                col = c * light;
+            }
+        }
+    }
+
+    if (y < gh) {
+        // Grass on top (hanging down unevenly), tiled dirt, stone deeper down, the odd ore.
+        let depth = gh - y;
+        let tile = floor(vec2<f32>(gx, y) / 3.0);
+        let n = hash21(tile);
+        let speck = hash21(vec2<f32>(gx, y) * 1.3);
+        var c: vec3<f32>;
+        let hang = 1.0 + floor(hash21(vec2<f32>(gx, 5.0)) * 3.0);
+        if (depth <= 1.0) {
+            c = vec3<f32>(0.36, 0.72, 0.22);
+        } else if (depth <= hang) {
+            c = vec3<f32>(0.2, 0.52, 0.16);
+        } else if (depth < 12.0 + 7.0 * vnoise(vec2<f32>(gx / 9.0, 9.0))) {
+            c = vec3<f32>(0.55, 0.36, 0.22) * (0.88 + 0.22 * n);
+            if (speck > 0.9) {
+                c *= 0.78;
+            } else if (speck < 0.04) {
+                c = vec3<f32>(0.5, 0.48, 0.45);
+            }
+        } else {
+            c = vec3<f32>(0.44, 0.44, 0.47) * (0.85 + 0.25 * n);
+            if (n > 0.95) {
+                c = vec3<f32>(0.85, 0.5, 0.25);
+            } else if (n < 0.03) {
+                c = vec3<f32>(0.75, 0.72, 0.68);
+            } else if (speck > 0.92) {
+                c *= 0.75;
+            }
+        }
+        // Tile seams, faintly.
+        if ((fract(gx / 3.0) < 0.3 || fract(y / 3.0) < 0.3) && depth > hang && n > 0.5) {
+            c *= 0.9;
+        }
+        col = c * light * mix(1.0, 0.4, smoothstep(3.0, 30.0, depth));
+    } else {
+        // Grass blades and flowers, bending further the higher up and the stronger the wind.
+        for (var kk = 0; kk < 4; kk++) {
+            let src = gx - f32(kk);
+            let sg = px_ground(src, 30.0, 10.0, 26.0, 4.0);
+            let dy = y - sg + 1.0;
+            let clump = 0.3 + smoothstep(0.3, 0.7, vnoise(vec2<f32>(src / 7.0, 12.0)));
+            let hs = hash21(vec2<f32>(src, 7.0));
+            let flower = hash21(vec2<f32>(src, 9.0)) > 0.93;
+            let bh = floor(hs * 4.5 * clump) + select(0.0, 1.0, flower);
+            let shift = floor(px_wind(src, t) * dy * dy / 9.0 + 0.5);
+            if (dy >= 1.0 && dy <= bh && f32(kk) == shift) {
+                var c = mix(vec3<f32>(0.2, 0.5, 0.15), vec3<f32>(0.45, 0.75, 0.25), dy / max(bh, 1.0));
+                if (flower && dy == bh) {
+                    let fc = fract(hs * 13.0);
+                    c = select(select(vec3<f32>(0.95, 0.85, 0.3), vec3<f32>(0.6, 0.4, 0.9), fc > 0.66), vec3<f32>(0.95, 0.3, 0.35), fc < 0.33);
+                }
+                col = c * light;
+                break;
+            }
+        }
+        // Mushrooms here and there.
+        for (var m = -1; m <= 1; m++) {
+            let src = gx + f32(m);
+            if (hash21(vec2<f32>(src, 13.0)) < 0.015) {
+                let sg = px_ground(src, 30.0, 10.0, 26.0, 4.0);
+                if (y == sg && m == 0) {
+                    col = vec3<f32>(0.9, 0.85, 0.75) * light;
+                } else if (y == sg + 1.0) {
+                    col = select(vec3<f32>(0.85, 0.2, 0.15), vec3<f32>(0.95, 0.9, 0.85), m == 0 && fract(src * 0.37) > 0.5) * light;
+                }
+            }
+        }
+    }
+
+    // Leaves blowing across in the wind, tumbling as they go.
+    for (var l = 0; l < 36; l++) {
+        let fl = f32(l);
+        let hk = hash21(vec2<f32>(fl, 21.0));
+        let prog = fract(t * (0.025 + 0.03 * fract(hk * 3.3)) + hk);
+        let lx = prog * (p.aspect + 0.4) - 0.2;
+        let start = 0.3 + 0.5 * fract(hk * 5.1);
+        let ly = start - 0.35 * prog * fract(hk * 7.7 + 0.4) + 0.025 * sin(t * 2.5 + fl * 1.7);
+        let rel = cell - floor(vec2<f32>(lx, ly) * PX_ROWS);
+        let ph = fract(t * 2.0 + hk * 4.0);
+        let hit = select(rel.x == 0.0 && (rel.y == 0.0 || rel.y == 1.0), rel.y == 0.0 && (rel.x == 0.0 || rel.x == 1.0), ph < 0.5);
+        if (hit) {
+            let lc = fract(hk * 17.0);
+            col = select(select(vec3<f32>(0.95, 0.6, 0.2), vec3<f32>(0.85, 0.75, 0.25), lc > 0.7), vec3<f32>(0.35, 0.65, 0.2), lc < 0.45) * light;
+        }
+    }
+
+    // Wind: white streaks blowing across that curl into a loop now and then, trailing off.
+    for (var w = 0; w < 6; w++) {
+        let fw = f32(w);
+        let hw = hash21(vec2<f32>(fw, 31.0));
+        let y0 = 0.25 + 0.55 * fract(hw * 6.1);
+        if (abs(q.y - y0) > 0.09) {
+            continue;
+        }
+        for (var i = 0; i < 26; i++) {
+            let ti = t - f32(i) * 0.025;
+            var pos = vec2<f32>(fract(ti * 0.07 + hw) * (p.aspect + 0.6) - 0.3, y0 + 0.015 * sin(ti * 1.7 + fw * 2.0));
+            let lp = fract(ti * 0.22 + fract(hw * 3.9));
+            if (lp > 0.3 && lp < 0.5) {
+                let ang = (lp - 0.3) / 0.2 * 6.2832;
+                pos += 0.045 * vec2<f32>(sin(ang), 1.0 - cos(ang));
+            }
+            if (all(cell == floor(pos * PX_ROWS))) {
+                col = mix(col, vec3<f32>(1.0, 0.98, 0.92), 0.75 * (1.0 - f32(i) / 26.0));
+                break;
+            }
+        }
+    }
+
+    // Fireflies over the grass, drifting and pulsing.
+    for (var f = 0; f < 12; f++) {
+        let ffk = f32(f);
+        let hk = hash21(vec2<f32>(ffk, 11.0));
+        let fx = fract(hk * 3.7 + t * 0.006) * p.aspect + 0.04 * sin(t * 0.6 + ffk * 2.0);
+        let fy = 0.2 + 0.18 * fract(hk * 7.1) + 0.03 * sin(t * 0.9 + ffk);
+        let rel = abs(cell - floor(vec2<f32>(fx, fy) * PX_ROWS));
+        let pulse = smoothstep(0.2, 1.0, sin(t * 2.0 + ffk * 4.0));
+        if (rel.x + rel.y < 0.5) {
+            col = mix(col, vec3<f32>(1.0, 1.0, 0.6), pulse);
+        } else if (rel.x + rel.y < 1.5) {
+            col = mix(col, vec3<f32>(0.9, 0.9, 0.4), pulse * 0.35);
+        }
+    }
+    return srgb_lin(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)));
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
@@ -443,6 +850,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     } else if (style == 7) {
         // Driven by the clock (seconds of the day), like the real menu.
         col = ps2(uv, p.pad0);
+    } else if (style == 9) {
+        col = pixel(uv, p.time * p.speed * 0.75);
     } else if (style == 8) {
         col = xbox(uv, p.time * p.speed * 0.6);
     } else if (style == 6) {

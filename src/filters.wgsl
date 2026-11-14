@@ -9,6 +9,11 @@ struct Filters {
     time: f32,
     strength: f32,
     lines: f32,
+    // CRT frame (bezel) opacity: 0 shows the plain picture round the curved glass.
+    frame: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
 }
 
 @group(0) @binding(0) var screen: texture_2d<f32>;
@@ -120,7 +125,11 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         c = c * (vec2<f32>(1.0) + c.yx * c.yx * k);
         let edge = rounded_box(c, vec2<f32>(1.0), 0.09);
         if edge > 0.0 {
-            return bezel(c, edge);
+            let a = clamp(f.frame, 0.0, 1.0);
+            if a <= 0.0 {
+                return textureSample(screen, samp, in.uv);
+            }
+            return mix(textureSample(screen, samp, in.uv), bezel(c, edge), a);
         }
         uv = c * 0.5 + 0.5;
         // Each line shivers sideways a little (unsteady horizontal sync).
