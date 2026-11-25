@@ -227,6 +227,8 @@ impl BackgroundStyle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
+    /// The settings preset these settings belong to (see presets.rs).
+    pub preset: String,
     pub fullscreen: bool,
     pub vsync: bool,
     /// With vsync: a frame that is late shows straight away (a tear) instead of waiting for the
@@ -243,6 +245,8 @@ pub struct General {
     pub home_button: bool,
     /// Nintendo face buttons (A on the right, B at the bottom): A still opens, B still closes.
     pub nintendo_buttons: bool,
+    /// The controller rumbles a little as you move, open a case and launch a game.
+    pub rumble: bool,
     /// Quit Slipcase once a game has started.
     pub close_on_launch: bool,
     /// No window border and no background: the cases float over your other windows.
@@ -295,10 +299,12 @@ impl Default for General {
             minimize_on_launch: false,
             home_button: false,
             nintendo_buttons: false,
+            rumble: true,
             close_on_launch: false,
             overlay: false,
             overlay_alpha: "auto".into(),
             last_game: String::new(),
+            preset: "Default".into(),
             show_hints: true,
             show_fps: false,
             render_resolution: 100.0,

@@ -21,11 +21,15 @@ mod settings;
 mod textedit;
 mod toss;
 mod record;
+mod presets;
 mod resolution;
 mod mirror;
 mod filters;
 mod fps;
 mod fonts;
+mod letters;
+mod rumble;
+mod single;
 
 use bevy::prelude::*;
 use bevy::window::{CompositeAlphaMode, WindowMode, WindowPosition};
@@ -137,6 +141,8 @@ fn main() {
     if let Some(code) = cli(&args) {
         std::process::exit(code);
     }
+    // Already running: that window was asked to come to the front.
+    let Some(instance) = single::acquire() else { return };
 
     let mut cfg = Config::load();
     let mut lib = Library::load();
@@ -192,7 +198,10 @@ fn main() {
         .add_plugins(controls::ControlsPlugin)
         .add_plugins(resolution::ResolutionPlugin)
         .add_plugins(fonts::FontsPlugin)
+        .add_plugins((rumble::RumblePlugin, letters::LettersPlugin))
         .add_systems(Update, set_window_icon)
+        .insert_resource(instance)
+        .add_systems(Startup, single::listen)
         .insert_resource(app::initial_msaa(&cfg))
         .insert_resource(ClearColor(if overlay { Color::NONE } else { Color::BLACK }))
         .insert_resource(app::Overlay(overlay))

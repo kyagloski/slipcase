@@ -120,6 +120,8 @@ desktop. Either way it gets out of the way the moment a game launches.
 - **🖼️ Art from everywhere**: SteamGridDB, Steam, LaunchBox, libretro and more, picked automatically. Or open the art picker and choose the cover, back, spine, disc and insert yourself.
 - **✋ Feels good to touch**: covers lean away from the mouse, drag a case to spin it, flick to send it spinning, scroll with momentum. **Ctrl + drag** picks a game up and lets you throw it into the others. Gamepads work too.
 - **🎨 Make it yours**: per-game case colours (see-through too), highlight colours, background palettes, motion styles, case corners, sizes, field of view, a shine across the selected game, a mirror reflection under it, glossy print, the shelf colour, retro screen filters (CRT, VHS, Game Boy, 8-bit, film grain and more) and the interface font (Minecraft-style pixels included). Every setting is in the menu and nothing needs a config file.
+- **🎚️ Presets**: keep whole sets of settings (a cosy shelf, a CRT arcade, a TV setup) and switch between them in one press. Search finds any setting by typing **/** in the menu.
+- **🎮 Made for the couch**: hold a bumper to jump through the list by letter, press Select for a controls chart in your controller's own button names, and feel a little rumble as you browse and launch.
 - **🍷 Windows games on Linux**: programs and installers run through Proton, with a per-game Proton build and options.
 - **📦 Owned but not installed?** Optional. They show up with a download badge, and Enter opens the store's install dialog.
 - **⚡ Fast**: one Rust binary on Bevy, with every cover, spine and disc cached after the first run.

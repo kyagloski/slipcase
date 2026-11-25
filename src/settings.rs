@@ -61,6 +61,8 @@ enum Act {
     BrowseFiles,
     HideGame,
     RemoveGame,
+    NewPreset,
+    DeletePreset,
 }
 
 enum Kind {
@@ -100,6 +102,10 @@ enum Kind {
     Sub(&'static str),
     /// A colour (hex string), set with the colour picker.
     Color(fn(&mut ConfigData) -> &mut String),
+    /// A settings preset (by name); activating it switches to it.
+    Preset(String),
+    /// The name of the preset in use (Enter to rename it).
+    PresetName,
 }
 
 struct Entry {
@@ -169,6 +175,7 @@ macro_rules! options {
 }
 
 const HIDDEN_HEADER: &str = "Hidden games";
+const PRESETS_HEADER: &str = "Presets";
 /// Case colours a game can be given ("" = the console's own).
 const CASE_COLORS: [(&str, &str); 11] = [
     ("", "Console default"),
@@ -207,6 +214,11 @@ fn hidden_entries(lib: &Library, cfg: &Config) -> Vec<Entry> {
     out
 }
 
+/// One row per settings preset, the one in use marked.
+fn preset_entries(cfg: &Config) -> Vec<Entry> {
+    crate::presets::list(&cfg.general.preset).into_iter().map(|n| Entry { label: "", kind: Kind::Preset(n), effect: Effect::None, advanced: false }).collect()
+}
+
 fn cycle_list<T: PartialEq + Copy>(all: &[T], cur: T, d: i32) -> T {
     let i = all.iter().position(|x| *x == cur).unwrap_or(0) as i32;
     all[(i + d).rem_euclid(all.len() as i32) as usize]
@@ -214,6 +226,11 @@ fn cycle_list<T: PartialEq + Copy>(all: &[T], cur: T, d: i32) -> T {
 
 fn entries() -> Vec<Entry> {
     vec![
+        // Filled in from the presets folder, see `preset_entries`.
+        header!(PRESETS_HEADER),
+        Entry { label: "Name of this preset (Enter to rename)", kind: Kind::PresetName, effect: Effect::None, advanced: false },
+        Entry { label: "Save as a new preset", kind: Kind::Act(Act::NewPreset), effect: Effect::None, advanced: false },
+        Entry { label: "Delete this preset", kind: Kind::Act(Act::DeletePreset), effect: Effect::None, advanced: false },
         header!("Library"),
         Entry { label: "Add game files...", kind: Kind::Act(Act::AddFiles), effect: Effect::None, advanced: false },
         Entry { label: "Add a folder of games...", kind: Kind::Act(Act::AddFolder), effect: Effect::None, advanced: false },
@@ -347,6 +364,7 @@ fn entries() -> Vec<Entry> {
         toggle!("Close after launching", general.close_on_launch, Effect::None),
         toggle!("Controller home button shows Slipcase", general.home_button, Effect::Window),
         toggle!("Nintendo button layout (A on the right)", general.nintendo_buttons, Effect::None),
+        toggle!("Controller rumble", general.rumble, Effect::None),
         header!("Motion"),
         num!("Speed", animation.speed, 0.2, 4.0, 0.1, Effect::None),
         options!("Selection motion", animation.motion, ["direct", "flip", "tumble", "roll", "dip", "swoop"], Effect::None),
@@ -367,13 +385,13 @@ fn entries() -> Vec<Entry> {
         num!("UI scale", general.ui_scale, 0.5, 2.0, 0.05, Effect::UiScale),
         options!("Font", general.font, ["default", "minecraft", "arcade", "terminal", "tiny pixel", "sci-fi", "retro future", "signage"], Effect::None),
         toggle!("Show FPS", general.show_fps, Effect::None),
-        toggle!("Filters on (all the ticked ones in Filters; X)", filters.enabled, Effect::None),
+        toggle!("Filters", filters.enabled, Effect::None),
+        toggle!("Filter text", filters.cover_menus, Effect::None),
+        toggle!("Filter background only", filters.background_only, Effect::None),
         adv(toggle!("Shadows", general.shadows, Effect::None)),
         adv(num!("FPS in background (0 = paused)", general.background_fps, 0.0, 30.0, 1.0, Effect::Window)),
         // Screen filters, as a group of their own; any number can be on at once.
         Entry { label: SUB_FILTERS, kind: Kind::Sub(SUB_FILTERS), effect: Effect::None, advanced: false },
-        toggle!("Filters cover on-screen text too", filters.cover_menus, Effect::None),
-        toggle!("Filters only on the background", filters.background_only, Effect::None),
         toggle!("CRT television", filters.crt, Effect::None),
         options!("CRT colour", filters.crt_colour, ["colour", "amber", "green", "white"], Effect::None),
         num!("CRT frame opacity", filters.crt_frame, 0.0, 1.0, 0.05, Effect::None),
@@ -414,6 +432,12 @@ pub struct Menu {
     scroll: usize,
     /// Text being edited in the dialog.
     editing: Option<crate::textedit::TextEdit>,
+    /// What the settings are filtered by (empty: all of them, as usual).
+    search: String,
+    /// Typing in the search box (/ or a click starts it).
+    search_edit: Option<crate::textedit::TextEdit>,
+    /// The search the list was last filtered by.
+    searched: String,
     /// Mouse is dragging a selection in the dialog's field; last click (time, char) for double clicks.
     edit_drag: bool,
     edit_click: (f32, usize),
@@ -445,6 +469,8 @@ pub struct Menu {
     remove_armed: Option<(String, std::time::Instant)>,
     /// Hide was pressed once for this game: a second press before the time hides it.
     hide_armed: Option<(String, std::time::Instant)>,
+    /// Delete preset was pressed once: a second press before the time deletes it.
+    delete_armed: Option<std::time::Instant>,
     /// The number setting (entry index) whose slider is being dragged.
     slider_drag: Option<usize>,
     /// Groups inside categories that are open (see `Kind::Sub`).
@@ -490,6 +516,9 @@ impl Default for Menu {
             index: 0,
             scroll: 0,
             editing: None,
+            search: String::new(),
+            search_edit: None,
+            searched: String::new(),
             edit_drag: false,
             edit_click: (-1.0, usize::MAX),
             rom_platform: None,
@@ -506,6 +535,7 @@ impl Default for Menu {
             remove_row: false,
             remove_armed: None,
             hide_armed: None,
+            delete_armed: None,
             expanded: Vec::new(),
             // Every category starts folded.
             collapsed: category_headers(),
@@ -518,12 +548,12 @@ const MAX_ROWS: usize = 80;
 /// Height of one row including the gap, in logical pixels (headings add a little more).
 const ROW_H: f32 = 38.0;
 /// Title, help text, footer, the button bar and padding.
-const MENU_CHROME: f32 = 220.0;
+const MENU_CHROME: f32 = 262.0;
 /// Width of the settings panel.
 pub const PANEL_W: f32 = 500.0;
 
 #[derive(Component)]
-struct MenuPanel;
+pub struct MenuPanel;
 #[derive(Component)]
 struct MenuRow(usize);
 #[derive(Component)]
@@ -557,7 +587,8 @@ fn draw_menu_icons(menu: Res<Menu>, category_icons: Option<Res<CategoryIcons>>, 
 struct CategoryIcons(std::collections::HashMap<&'static str, Handle<Image>>);
 
 fn load_category_icons(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let files: [(&'static str, &[u8]); 10] = [
+    let files: [(&'static str, &[u8]); 11] = [
+        (PRESETS_HEADER, include_bytes!("icons/1f39b.png")),
         ("Library", include_bytes!("icons/1f4da.png")),
         ("Selected game", include_bytes!("icons/1f3ae.png")),
         (HIDDEN_HEADER, include_bytes!("icons/1f648.png")),
@@ -583,6 +614,11 @@ fn load_category_icons(mut commands: Commands, mut images: ResMut<Assets<Image>>
 struct RowValue(usize);
 #[derive(Component)]
 struct MenuFooter;
+/// The search box under the title, and its text.
+#[derive(Component)]
+struct SearchBox;
+#[derive(Component)]
+struct SearchText;
 /// Line under a category heading.
 #[derive(Component)]
 struct RowUnderline(usize);
@@ -644,6 +680,7 @@ impl Plugin for SettingsPlugin {
             .add_systems(Update, draw_menu_icons.after(draw_menu))
             .add_systems(Update, size_value_boxes.after(draw_menu))
             .add_systems(Update, draw_sliders.after(draw_menu))
+            .add_systems(Update, draw_search.after(menu_input))
             .add_systems(Update, measure_picked_font)
             .add_systems(PostUpdate, menu_camera.before(bevy::ui::UiSystem::Layout))
             .add_systems(Update, (menu_input, color_pick_input, menu_pickers, draw_menu, draw_edit_dialog, draw_restart_prompt, draw_color_picker).chain());
@@ -697,7 +734,7 @@ fn measure_picked_font(cfg: Res<Config>, mut fonts: ResMut<MenuFonts>, mut appli
 }
 
 /// Draws the settings windows (panel, dialogs, pickers) after the screen filters, so they stay
-/// readable even with "Filters cover on-screen text too". Only on while one of them is open,
+/// readable even with "Filter text". Only on while one of them is open,
 /// or while the filters cover the on-screen text: the gear and the controls chart's icon are
 /// then drawn here too, so the CRT curve never moves them away from where they are clicked.
 #[derive(Component)]
@@ -860,9 +897,31 @@ fn spawn_menu(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
             .with_children(|b| {
                 b.spawn(txt(&f.regular, 22.0, DIM, "X"));
             });
-            let mut h = txt(&f.regular, 14.0, DIM, "Up / Down to move, Left / Right or drag to change, Enter to edit, Esc to close");
-            h.style.margin = UiRect { top: Val::Px(2.0), bottom: Val::Px(12.0), ..default() };
+            let mut h = txt(&f.regular, 14.0, DIM, "Up / Down to move, Left / Right or drag to change, Enter to edit, / to search, Esc to close");
+            h.style.margin = UiRect { top: Val::Px(2.0), bottom: Val::Px(10.0), ..default() };
             p.spawn(h);
+            p.spawn((
+                ButtonBundle {
+                    style: Style {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(34.0),
+                        align_items: AlignItems::Center,
+                        padding: UiRect::axes(Val::Px(10.0), Val::Px(0.0)),
+                        margin: UiRect::bottom(Val::Px(8.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    border_radius: radius,
+                    background_color: BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.05)),
+                    border_color: BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+                    ..default()
+                },
+                SearchBox,
+            ))
+            .with_children(|b| {
+                b.spawn((txt(&f.regular, 16.0, DIM, "Search settings   ( / )"), SearchText));
+            });
             // The list takes all the height between the title and the bottom bar and clips what
             // does not fit, so the bar never moves.
             p.spawn(NodeBundle {
@@ -1050,6 +1109,7 @@ struct EditInput<'w, 's> {
     fonts: Res<'w, MenuFonts>,
     restart: Query<'w, 's, (&'static RestartBtn, &'static Interaction)>,
     sliders: Query<'w, 's, (&'static SliderTrack, &'static Interaction, &'static bevy::ui::RelativeCursorPosition)>,
+    search: Query<'w, 's, &'static Interaction, With<SearchBox>>,
 }
 
 /// Restart (true) / Later (false) in the restart question.
@@ -1399,6 +1459,7 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
         {
             "Confirm?".into()
         }
+        Kind::Act(Act::DeletePreset) if menu.delete_armed.is_some_and(|at| at.elapsed().as_secs_f32() < RESET_CONFIRM_SECS) => "Confirm?".into(),
         Kind::Act(_) => ">".into(),
         Kind::RomPlatform => menu.rom_platform.map_or("guess from files", |p| p.display_name()).to_string(),
         Kind::GameTitle => game.map(|g| crate::render::truncate(&g.title, 26)).unwrap_or_default(),
@@ -1426,6 +1487,8 @@ fn value_text(e: &Entry, cfg: &mut ConfigData, menu: &Menu, game: Option<&crate:
             .map(|s| crate::render::truncate(&s, 30))
             .unwrap_or_default(),
         Kind::GameProtonOptions => game.map(|g| if g.proton_options.is_empty() { "(none)".to_string() } else { crate::render::truncate(&g.proton_options, 26) }).unwrap_or_default(),
+        Kind::Preset(n) => if *n == cfg.general.preset { "In use" } else { "Switch to it" }.into(),
+        Kind::PresetName => crate::render::truncate(&cfg.general.preset, 26),
         Kind::HiddenGame(_) => "Unhide".into(),
         Kind::HiddenTitle(_) => "Unhide (not found yet)".into(),
         Kind::Note(_) => String::new(),
@@ -1448,6 +1511,7 @@ fn label_text(e: &Entry, lib: &Library, menu: &Menu) -> String {
     match &e.kind {
         Kind::HiddenGame(id) => lib.find(id).map(|g| crate::render::truncate(&g.title, 30)).unwrap_or_default(),
         Kind::HiddenTitle(t) => crate::render::truncate(t, 30),
+        Kind::Preset(n) => crate::render::truncate(n, 30),
         Kind::Note(t) => t.to_string(),
         // + to open, - to fold.
         Kind::Header if e.label.is_empty() => String::new(),
@@ -1485,11 +1549,20 @@ fn draw_menu(
     mut labels: Query<(&RowLabel, &mut Text), (Without<RowValue>, Without<MenuFooter>, Without<ResetLabel>)>,
     mut values: Query<(&RowValue, &mut Text), (Without<RowLabel>, Without<MenuFooter>, Without<ResetLabel>)>,
     mut footer: Query<&mut Text, (With<MenuFooter>, Without<RowLabel>, Without<RowValue>, Without<ResetLabel>)>,
+    mut slide: Local<f32>,
 ) {
+    // Slides in from the right edge, and back out again when closed.
+    let step = time.delta_seconds() / if menu.open { 0.22 } else { 0.16 };
+    *slide = if menu.open { (*slide + step).min(1.0) } else { (*slide - step).max(0.0) };
+    let shown = 1.0 - (1.0 - *slide).powi(3);
     for mut s in &mut panel {
-        let d = if menu.open { Display::Flex } else { Display::None };
+        let d = if *slide > 0.0 { Display::Flex } else { Display::None };
         if s.display != d {
             s.display = d;
+        }
+        let right = Val::Px(-(1.0 - shown) * (PANEL_W + 2.0));
+        if s.right != right {
+            s.right = right;
         }
     }
     if !menu.open {
@@ -1737,6 +1810,20 @@ struct Ctx<'w, 's> {
     scanner: ResMut<'w, Scanner>,
     windows: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
     winit: ResMut<'w, bevy::winit::WinitSettings>,
+    watch: ResMut<'w, crate::app::ConfigWatch>,
+}
+
+/// Puts preset `to` in place (saving the settings in use to theirs first, unless `keep` is
+/// false) and has the config reloaded right away, so every setting takes effect.
+fn switch_preset(menu: &mut Menu, ctx: &mut Ctx, to: &str, keep: bool) {
+    if crate::presets::switch(&mut ctx.cfg, to, keep) {
+        ctx.watch.mtime = None;
+        ctx.watch.timer = 1.0;
+        ctx.watch.note = Some(format!("Preset: {to}"));
+        menu.built = None;
+    } else {
+        ctx.toast.show(format!("Could not read the preset {to}"));
+    }
 }
 
 fn apply(ctx: &mut Ctx, effect: Effect) {
@@ -1955,6 +2042,17 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                 ctx.toast.show(format!("{title} is back"));
             }
         }
+        Kind::Preset(n) => {
+            let n = n.clone();
+            if n != ctx.cfg.general.preset {
+                switch_preset(menu, ctx, &n, true);
+            }
+        }
+        Kind::PresetName => {
+            if d == 0 {
+                menu.editing = Some(crate::textedit::TextEdit::new("Preset name", &ctx.cfg.general.preset));
+            }
+        }
         Kind::HiddenTitle(t) => {
             let t = t.clone();
             ctx.cfg.scan.hidden_titles.retain(|h| *h != t);
@@ -2062,6 +2160,32 @@ fn change(menu: &mut Menu, ctx: &mut Ctx, d: i32) {
                     ctx.toast.show(format!("Removed {title}"));
                 }
             }
+            Act::NewPreset => {
+                let cur = ctx.cfg.general.preset.clone();
+                let names = crate::presets::list(&cur);
+                let name = (2..).map(|n| format!("Preset {n}")).find(|c| !names.iter().any(|x| x.eq_ignore_ascii_case(c))).unwrap_or_default();
+                crate::presets::save(&cur, &ctx.cfg.data);
+                ctx.cfg.data.general.preset = name.clone();
+                crate::presets::save(&name, &ctx.cfg.data);
+                apply(ctx, Effect::None);
+                menu.built = None;
+                ctx.toast.show(format!("Saved as {name}: changes now go to it (rename it above)"));
+            }
+            Act::DeletePreset => {
+                let cur = ctx.cfg.general.preset.clone();
+                let Some(other) = crate::presets::list(&cur).into_iter().find(|n| *n != cur) else {
+                    ctx.toast.show("This is the only preset: save a new one first");
+                    return;
+                };
+                let armed = menu.delete_armed.take().is_some_and(|at| at.elapsed().as_secs_f32() < RESET_CONFIRM_SECS);
+                if !armed {
+                    menu.delete_armed = Some(std::time::Instant::now());
+                    ctx.toast.show(format!("Press again to delete the preset {cur}"));
+                } else {
+                    crate::presets::delete(&cur);
+                    switch_preset(menu, ctx, &other, false);
+                }
+            }
             Act::HideGame => {
                 let Some(id) = game_id else { return };
                 let armed = menu.hide_armed.take().is_some_and(|(a, at)| a == id && at.elapsed().as_secs_f32() < RESET_CONFIRM_SECS);
@@ -2105,6 +2229,23 @@ fn commit_edit(menu: &mut Menu, ctx: &mut Ctx) {
         Kind::Text(f) => {
             *f(&mut ctx.cfg.data) = text.trim().to_string();
             apply(ctx, effect);
+        }
+        Kind::PresetName => {
+            let cur = ctx.cfg.general.preset.clone();
+            let new = crate::presets::clean(&text);
+            if new.is_empty() || new == cur {
+                return;
+            }
+            if crate::presets::exists(&new) && !new.eq_ignore_ascii_case(&cur) {
+                ctx.toast.show(format!("There is already a preset called {new}"));
+                return;
+            }
+            crate::presets::rename(&cur, &new);
+            ctx.cfg.data.general.preset = new.clone();
+            crate::presets::save(&new, &ctx.cfg.data);
+            apply(ctx, Effect::None);
+            menu.built = None;
+            ctx.toast.show(format!("Renamed the preset to {new}"));
         }
         Kind::GameTitle => {
             let id = ctx.view.selected_game(&ctx.lib).map(|g| g.id.clone());
@@ -2166,6 +2307,7 @@ fn close(menu: &mut Menu) {
     menu.open = false;
     menu.just_closed = true;
     menu.editing = None;
+    menu.search_edit = None;
     menu.slider_drag = None;
     menu.ui_scale_hold = None;
 }
@@ -2311,6 +2453,67 @@ fn menu_input(
             }
         }
         wheel.clear();
+        return;
+    }
+
+    // Search: / (or a click on the box) to type, Enter to keep the results and move through
+    // them, Esc to clear it. Up / Down move through the results while typing.
+    let search_clicked = mouse.just_pressed(MouseButton::Left) && edit.search.iter().any(|i| *i == Interaction::Pressed);
+    if menu.search_edit.is_none() && (search_clicked || keys.just_pressed(KeyCode::Slash) || keys.just_pressed(KeyCode::NumpadDivide)) {
+        let cur = menu.search.clone();
+        let mut ed = crate::textedit::TextEdit::new("Search", &cur);
+        ed.move_to(ed.len(), false);
+        ed.last_input = time.elapsed_seconds();
+        menu.search_edit = Some(ed);
+        wheel.clear();
+        return;
+    }
+    if menu.search_edit.is_some() {
+        let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
+        let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let now = time.elapsed_seconds();
+        for e in &typed {
+            let r = menu.search_edit.as_mut().map(|ed| ed.key(e, ctrl, shift, now)).unwrap_or(crate::textedit::EditResult::None);
+            match r {
+                crate::textedit::EditResult::Commit => {
+                    menu.search_edit = None;
+                    break;
+                }
+                crate::textedit::EditResult::Cancel => {
+                    menu.search_edit = None;
+                    menu.search.clear();
+                    break;
+                }
+                crate::textedit::EditResult::None => {}
+            }
+        }
+        let text = menu.search_edit.as_ref().map(|e| e.text()).unwrap_or_else(|| menu.search.clone());
+        if text != menu.search {
+            menu.search = text;
+        }
+        if menu.search_edit.is_none() || menu.search != menu.searched {
+            refilter(&mut menu, &ctx);
+        }
+        if menu.search_edit.is_some() {
+            if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowDown) {
+                step_index(&mut menu, if keys.just_pressed(KeyCode::ArrowUp) { -1 } else { 1 });
+            }
+            // A click anywhere else stops typing (the results stay) and is used as usual.
+            if !(mouse.just_pressed(MouseButton::Left) && !search_clicked) {
+                return;
+            }
+            menu.search_edit = None;
+        } else {
+            wheel.clear();
+            return;
+        }
+    }
+    // Searched, not typing: the usual exit keys clear the search before closing anything.
+    if !menu.search.is_empty()
+        && (keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) || keys_pressed(&ctx.cfg.keys.quit, &keys) || pressed_pad(crate::app::face(&ctx.cfg, GamepadButtonType::East)))
+    {
+        menu.search.clear();
+        refilter(&mut menu, &ctx);
         return;
     }
 
@@ -2474,6 +2677,56 @@ fn menu_input(
     }
 }
 
+/// The list again for a new search, from the top: the first match selected.
+fn refilter(menu: &mut Menu, ctx: &Ctx) {
+    rebuild_entries(menu, &ctx.lib, &ctx.cfg);
+    menu.scroll = 0;
+    menu.index = 0;
+    if menu.entries.first().is_some_and(|e| matches!(e.kind, Kind::Header) || !selectable(e)) && menu.entries.len() > 1 {
+        step_index(menu, 1);
+    }
+}
+
+fn draw_search(menu: Res<Menu>, time: Res<Time>, mut text: Query<&mut Text, With<SearchText>>, mut boxes: Query<(&Interaction, &mut BorderColor), With<SearchBox>>) {
+    let typing = menu.search_edit.as_ref();
+    let (s, color) = match typing {
+        Some(ed) => {
+            let blink = ((time.elapsed_seconds() - ed.last_input) * 1.8).floor() as i64 % 2 == 0;
+            let (a, b) = ed.text().chars().enumerate().fold((String::new(), String::new()), |(mut a, mut b), (i, c)| {
+                if i < ed.cursor {
+                    a.push(c);
+                } else {
+                    b.push(c);
+                }
+                (a, b)
+            });
+            (format!("{a}{}{b}", if blink { "|" } else { " " }), TEXT)
+        }
+        None if menu.search.is_empty() => ("Search settings   ( / )".to_string(), DIM),
+        None => (format!("{}      (Esc to clear)", menu.search), ACCENT),
+    };
+    for mut t in &mut text {
+        if t.sections[0].value != s {
+            t.sections[0].value = s.clone();
+        }
+        if t.sections[0].style.color != color {
+            t.sections[0].style.color = color;
+        }
+    }
+    for (i, mut b) in &mut boxes {
+        let c = if typing.is_some() {
+            ACCENT
+        } else if *i != Interaction::None {
+            Color::srgba(1.0, 1.0, 1.0, 0.3)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.12)
+        };
+        if b.0 != c {
+            b.0 = c;
+        }
+    }
+}
+
 /// Every setting back to its default, except what describes the user's library rather than
 /// how it looks: scanned folders, hidden games, per-console overrides (emulator commands)
 /// and cover API keys.
@@ -2502,10 +2755,58 @@ fn rebuild_entries(menu: &mut Menu, lib: &Library, cfg: &Config) {
         Kind::Act(Act::RemoveGame) => menu.remove_row,
         _ => true,
     });
+    if let Some(h) = all.iter().position(|e| matches!(e.kind, Kind::Header) && e.label == PRESETS_HEADER) {
+        let tail = all.split_off(h + 1);
+        all.extend(preset_entries(cfg));
+        all.extend(tail);
+    }
     if let Some(h) = all.iter().position(|e| matches!(e.kind, Kind::Header) && e.label == HIDDEN_HEADER) {
         let tail = all.split_off(h + 1);
         all.extend(hidden_entries(lib, cfg));
         all.extend(tail);
+    }
+    menu.searched = menu.search.clone();
+    let words: Vec<String> = menu.search.to_lowercase().split_whitespace().map(str::to_string).collect();
+    if !words.is_empty() {
+        // Searching: every matching setting (folded, grouped and advanced ones too) under its
+        // category's heading. A match on a category or group name lists all of it.
+        let mut list: Vec<Entry> = Vec::new();
+        let (mut category, mut group): (Option<Entry>, &'static str) = (None, "");
+        let mut cat_name: &'static str = "";
+        for e in all {
+            match e.kind {
+                Kind::Header => {
+                    cat_name = e.label;
+                    group = "";
+                    category = Some(e);
+                    continue;
+                }
+                Kind::Sub(n) => {
+                    group = n;
+                    continue;
+                }
+                Kind::Advanced(_) | Kind::Note(_) => continue,
+                _ => {}
+            }
+            let own = match &e.kind {
+                Kind::Preset(n) | Kind::HiddenTitle(n) => n.clone(),
+                Kind::HiddenGame(id) => lib.find(id).map(|g| g.title.clone()).unwrap_or_default(),
+                _ => e.label.to_string(),
+            };
+            let hay = format!("{own} {cat_name} {group}").to_lowercase();
+            if words.iter().all(|w| hay.contains(w.as_str())) {
+                if let Some(h) = category.take() {
+                    list.push(h);
+                }
+                list.push(e);
+            }
+        }
+        if list.is_empty() {
+            list.push(Entry { label: "", kind: Kind::Note("No settings match"), effect: Effect::None, advanced: false });
+        }
+        menu.entries = list;
+        menu.built = Some(lib.revision);
+        return;
     }
     // Each category: its everyday settings, its groups, then an "Advanced" row, then (when that
     // is open) the technical ones.
@@ -3220,7 +3521,7 @@ fn art_preview(ctx: &mut Ctx, tab: Option<ArtKind>) {
     let case = matches!(ctx.cfg.display.item_style, ItemStyle::Case | ItemStyle::CaseDisc);
     let view = &mut *ctx.view;
     view.free_turned = false;
-    view.spin_vel = 0.0;
+    view.spin_vel = Vec2::ZERO;
     let turn = match tab {
         Some(ArtKind::Back) => std::f32::consts::PI,
         Some(ArtKind::Spine) => std::f32::consts::FRAC_PI_2,

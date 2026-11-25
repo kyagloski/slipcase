@@ -19,6 +19,7 @@ use bevy::render::view::ViewTarget;
 use bevy::render::RenderApp;
 
 use crate::app::{BgCamera, MainCamera};
+use crate::resolution::PresentCamera;
 use crate::config::Config;
 
 const SHADER: Handle<Shader> = Handle::weak_from_u128(0x5eed_c0de_b4c6_41d0_9a53_1c0ffee00f17);
@@ -44,7 +45,8 @@ pub struct FilterSettings {
     strength: f32,
     lines: f32,
     frame: f32,
-    pad0: f32,
+    /// How far the filters are faded in (they ease in and out when turned on and off).
+    fade: f32,
     pad1: f32,
     pad2: f32,
 }
@@ -66,7 +68,10 @@ impl Plugin for FiltersPlugin {
             .add_render_graph_edges(Core3d, (bevy::ui::graph::NodeUi::UiPass, FilterOverUiLabel, Node3d::Upscaling))
             // "Only on the background": the background's own 2D camera, before the games are drawn over it.
             .add_render_graph_node::<ViewNodeRunner<FilterNode<false>>>(Core2d, FilterLabel)
-            .add_render_graph_edges(Core2d, (Node2d::Tonemapping, FilterLabel, Node2d::EndMainPassPostProcessing));
+            .add_render_graph_edges(Core2d, (Node2d::Tonemapping, FilterLabel, Node2d::EndMainPassPostProcessing))
+            // At another render resolution: the camera showing the scaled picture (and the text).
+            .add_render_graph_node::<ViewNodeRunner<FilterNode<true>>>(Core2d, FilterOverUiLabel)
+            .add_render_graph_edges(Core2d, (bevy::ui::graph::NodeUi::UiPass, FilterOverUiLabel, Node2d::Upscaling));
     }
 
     fn finish(&self, app: &mut App) {
@@ -104,12 +109,25 @@ fn sync_filters(
     mut commands: Commands,
     cfg: Res<Config>,
     time: Res<Time>,
-    mut cams: Query<(Entity, Option<&mut FilterSettings>, Has<BgCamera>), Or<(With<MainCamera>, With<BgCamera>)>>,
+    mut cams: Query<(Entity, &Camera, Option<&mut FilterSettings>, Has<BgCamera>, Has<PresentCamera>), Or<(With<MainCamera>, With<BgCamera>, With<PresentCamera>)>>,
+    // How far faded in, and the filters last on (kept while they fade out).
+    mut fade: Local<(f32, u32)>,
 ) {
-    let flags = flags(&cfg);
+    let now = flags(&cfg);
+    if now != 0 {
+        fade.1 = now;
+    }
+    let step = time.delta_seconds() / 0.4;
+    fade.0 = if now != 0 { (fade.0 + step).min(1.0) } else { (fade.0 - step).max(0.0) };
+    let flags = if fade.0 > 0.0 { fade.1 } else { 0 };
+    let eased = fade.0 * fade.0 * (3.0 - 2.0 * fade.0);
     let bg_only = cfg.filters.background_only;
-    for (e, cur, is_bg) in &mut cams {
-        if flags == 0 || is_bg != bg_only {
+    // At another render resolution the picture and the text are put on screen by their own
+    // camera: the filters go there, so they cover everything, at the window's resolution.
+    let scaled = cams.iter().any(|(_, c, _, _, p)| p && c.is_active);
+    for (e, _, cur, is_bg, is_present) in &mut cams {
+        let here = if bg_only { is_bg } else if scaled { is_present } else { !is_bg && !is_present };
+        if flags == 0 || !here {
             if cur.is_some() {
                 commands.entity(e).remove::<FilterSettings>();
             }
@@ -128,6 +146,7 @@ fn sync_filters(
             strength: cfg.filters.strength.clamp(0.0, 3.0),
             lines: cfg.filters.retro_lines.clamp(60.0, 2160.0),
             frame: cfg.filters.crt_frame.clamp(0.0, 1.0),
+            fade: eased,
             ..default()
         };
         match cur {

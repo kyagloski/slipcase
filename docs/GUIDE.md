@@ -81,7 +81,22 @@ coasts on, slowing down; any click stops it), right-drag rotates the selected
 case freely (a short right click flips it), click selects, double-click launches, wheel browses (scrolls rows on the wall), ctrl + wheel zooms.
 
 Gamepad: D-pad or left stick browse, A launch, bumpers layout, X background, Y favourite, B open / close the case,
-right stick rotates the selected item, right stick click flips it, Start opens the settings.
+right stick rotates the selected item, right stick click flips it, left stick click changes the platform, Start opens the settings.
+Hold a bumper to **jump by letter**: a strip of first letters shows, left / right picks one and the selection jumps
+there live, letting go closes it (a quick tap still changes the layout). Select (View, Create, -) shows a **controls
+chart** with the buttons named for your controller. **Controller rumble** (Settings > Controller, `general.rumble`)
+gives a small tick as you move, a bump when a case opens and a stronger one on launch; it only rumbles while the
+controller is what you are using.
+
+Ctrl+Down minimizes the window. Starting Slipcase while it is already running brings the open window to the front
+instead of opening a second one.
+
+### Settings presets and search
+
+Settings > **Presets** keeps whole sets of settings side by side (`presets/<name>.toml` next to `config.toml`):
+switch between them, rename the one in use, save the current settings as a new one or delete one (press twice).
+Your scanned stores, folders and hidden games are shared by every preset. In the settings, **/** (or a click on the
+search box) searches every setting, advanced ones included; Enter keeps the results, Esc clears them.
 
 ### Games you own but have not installed
 
@@ -167,10 +182,10 @@ may want a smaller "UI scale".
 `crt` (curved glass, scanlines, phosphor mask), `pixelate` (big pixels and 15-bit colour, like a 16-bit
 console), `posterize` (256 dithered colours, like 8-bit hardware), `game_boy` (four shades of green), `vhs`,
 `film_grain`, `vignette`, `black_and_white`, `sepia` and `chromatic_aberration`. `retro_lines` (240) sets
-how many pixels tall the pixelated picture is, and `strength` (1) scales every filter. `enabled` ("Filters on", or the X key) switches all
+how many pixels tall the pixelated picture is, and `strength` (1) scales every filter. `enabled` ("Filters", or the X key; they fade in and out) switches all
 the ticked ones off and on together without forgetting which they are. They cover the
-background and the games, not the menus, unless `cover_menus` ("Filters cover on-screen text too") is on: then the titles, info, hints and buttons
-are filtered as well. The settings are never filtered. With none on they cost nothing, and like everything else they are not
+background and the games, not the menus, unless `cover_menus` ("Filter text") is on: then the titles, info, hints and buttons
+are filtered as well. `background_only` ("Filter background only") leaves the games clean and filters just the background. The settings are never filtered. With none on they cost nothing, and like everything else they are not
 drawn while Slipcase is in the background.
 
 ## Display modes
@@ -306,6 +321,7 @@ Games with no cover get a generated placeholder with the title on it.
 - `config.toml`: hot-reloaded while running, edit it and watch the launcher change
 - `library.json`: your library, favourites and play counts
 - `cache/covers/`: downloaded art
+- `presets/`: your saved settings presets
 
 Spines and placeholder covers use a system font. Put a `font.ttf` next to `config.toml` to choose your own.
 

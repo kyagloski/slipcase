@@ -4,8 +4,8 @@
 //!
 //! While scaled, the main and background cameras draw into a picture of that size, and a camera
 //! of its own shows it over the whole window. The on-screen text moves to that camera, so it
-//! stays sharp (and clickable: Bevy only clicks interface drawn to a window), but is then not
-//! covered by the screen filters. In the overlay the picture keeps its see-through parts.
+//! stays sharp (and clickable: Bevy only clicks interface drawn to a window); the screen
+//! filters then run on that camera, over the whole picture (and the text, if asked). In the overlay the picture keeps its see-through parts.
 
 use bevy::asset::load_internal_asset;
 use bevy::prelude::*;
@@ -62,8 +62,9 @@ impl Plugin for ResolutionPlugin {
     }
 }
 
+/// Shows the scaled picture; while it is on, the screen filters run on it (see filters.rs).
 #[derive(Component)]
-struct PresentCamera;
+pub struct PresentCamera;
 #[derive(Component)]
 struct PresentSprite;
 

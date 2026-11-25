@@ -197,16 +197,18 @@ pub fn controls_input(
     menu: Res<crate::settings::Menu>,
 ) {
     chart.just_closed = false;
+    let pad_pressed = |t: GamepadButtonType| gamepads.iter().any(|g| pad.just_pressed(GamepadButton::new(g, t)));
+    // The controller's Select (View, Create, -) shows it, and hides it again.
+    let select = pad_pressed(GamepadButtonType::Select);
     if !chart.open {
-        if mouse.just_pressed(MouseButton::Left) && !menu.open && icon.iter().any(|i| *i == Interaction::Pressed) {
+        if (select || (mouse.just_pressed(MouseButton::Left) && icon.iter().any(|i| *i == Interaction::Pressed))) && !menu.open {
             chart.open = true;
         }
         return;
     }
-    let pad_pressed = |t: GamepadButtonType| gamepads.iter().any(|g| pad.just_pressed(GamepadButton::new(g, t)));
     let k = &cfg.keys;
     let by_key = keys.any_just_pressed([KeyCode::Escape, KeyCode::Backspace]) || keys_pressed(&k.close, &keys) || keys_pressed(&k.quit, &keys);
-    let by_pad = pad_pressed(crate::app::face(&cfg, GamepadButtonType::East));
+    let by_pad = pad_pressed(crate::app::face(&cfg, GamepadButtonType::East)) || select;
     let by_click = mouse.get_just_pressed().next().is_some() && !panel.iter().any(|i| *i != Interaction::None);
     if by_key || by_pad || by_click {
         chart.open = false;
@@ -247,9 +249,11 @@ fn draw(
     cfg: Res<Config>,
     gamepads: Res<Gamepads>,
     glyphs: Res<Glyphs>,
-    mut layer: Query<&mut Style, With<ControlsLayer>>,
-    panel: Query<Entity, With<ControlsPanel>>,
+    mut layer: Query<(&mut Style, &mut BackgroundColor), (With<ControlsLayer>, Without<ControlsPanel>)>,
+    mut panel: Query<(Entity, &mut Style), (With<ControlsPanel>, Without<ControlsLayer>)>,
     mut icon: Query<(&Interaction, &mut UiImage), With<ControlsButton>>,
+    time: Res<Time>,
+    mut age: Local<f32>,
 ) {
     for (interaction, mut img) in &mut icon {
         let c = match *interaction {
@@ -261,9 +265,19 @@ fn draw(
         }
     }
     let d = if chart.open { Display::Flex } else { Display::None };
-    for mut s in &mut layer {
+    *age = if chart.open { *age + time.delta_seconds() } else { 0.0 };
+    // Opening: the screen dims and the chart rises gently into place.
+    let a = 1.0 - (1.0 - (*age / 0.22).clamp(0.0, 1.0)).powi(3);
+    for (mut s, mut bg) in &mut layer {
         if s.display != d {
             s.display = d;
+        }
+        bg.0 = Color::srgba(0.0, 0.0, 0.0, 0.62 * a);
+    }
+    for (_, mut s) in &mut panel {
+        let top = Val::Px((1.0 - a) * 28.0);
+        if s.top != top {
+            s.top = top;
         }
     }
     if !chart.open {
@@ -275,7 +289,7 @@ fn draw(
         return;
     }
     chart.built = Some(kind);
-    let Ok(panel) = panel.get_single() else { return };
+    let Ok((panel, _)) = panel.get_single() else { return };
     commands.entity(panel).despawn_descendants();
     let name = first_pad(&gamepads).and_then(|g| gamepads.name(g)).unwrap_or("Controller").to_string();
     commands.entity(panel).with_children(|p| {
@@ -528,10 +542,10 @@ fn pad_chart(cols: &mut ChildBuilder, kind: PadKind, cfg: &Config, glyphs: &Glyp
         PadKind::PlayStation => ("L1", "R1", "L2", "R2"),
         PadKind::Nintendo => ("L", "R", "ZL", "ZR"),
     };
-    let (select, start, guide, r3) = match kind {
-        PadKind::Xbox => ("View", "Menu", "Xbox", "RS"),
-        PadKind::PlayStation => ("Create", "Options", "PS", "R3"),
-        PadKind::Nintendo => ("-", "+", "Home", "RS"),
+    let (select, start, guide, r3, l3) = match kind {
+        PadKind::Xbox => ("View", "Menu", "Xbox", "RS", "LS"),
+        PadKind::PlayStation => ("Create", "Options", "PS", "R3", "L3"),
+        PadKind::Nintendo => ("-", "+", "Home", "RS", "LS"),
     };
     column(cols, |c| {
         heading(c, "BROWSING");
@@ -551,13 +565,18 @@ fn pad_chart(cols: &mut ChildBuilder, kind: PadKind, cfg: &Config, glyphs: &Glyp
     });
     column(cols, |c| {
         heading(c, "VIEW");
-        row(c, "Previous / next layout", |r| {
+        row(c, "Previous / next layout (tap)", |r| {
+            pill(r, lb);
+            pill(r, rb);
+        });
+        row(c, "Jump by letter (hold, then left / right)", |r| {
             pill(r, lb);
             pill(r, rb);
         });
         row(c, "Background", |r| face_chip(r, kind, f(West), glyphs));
-        row(c, "Next platform", |r| pill(r, select));
+        row(c, "Next platform (press the stick)", |r| pill(r, l3));
         row(c, "Settings", |r| pill(r, start));
+        row(c, "Controls (this chart)", |r| pill(r, select));
         if cfg.general.home_button {
             row(c, "Bring the window back", |r| pill(r, guide));
         }

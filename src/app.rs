@@ -121,9 +121,9 @@ pub struct ViewState {
     pub insert_hold: f32,
     /// The insert's printed pages per game (kept for the session).
     pub pages: HashMap<String, Vec<(Handle<Image>, u32, u32)>>,
-    /// Spin speed (rad/s) of the selected item: tracked while right-dragging, then it keeps
-    /// spinning after a flick and slows down.
-    pub spin_vel: f32,
+    /// Spin speed (rad/s, across and up/down) of the selected item: tracked while
+    /// right-dragging, then it keeps spinning after a flick and slows down.
+    pub spin_vel: Vec2,
     /// The selected item is being turned with the mouse right now.
     pub turning: bool,
     /// The current rotation came from free turning (so it snaps to front / back afterwards).
@@ -211,7 +211,7 @@ impl ViewState {
             insert_left: false,
             insert_hold: 0.0,
             pages: HashMap::new(),
-            spin_vel: 0.0,
+            spin_vel: Vec2::ZERO,
             turning: false,
             free_turned: false,
             centred: false,
@@ -383,6 +383,8 @@ impl ViewState {
     }
 }
 
+const TOAST_SECS: f32 = 3.5;
+
 #[derive(Resource, Default)]
 pub struct Toast {
     pub text: String,
@@ -392,7 +394,7 @@ pub struct Toast {
 impl Toast {
     pub fn show(&mut self, s: impl Into<String>) {
         self.text = s.into();
-        self.ttl = 3.5;
+        self.ttl = TOAST_SECS;
     }
 }
 
@@ -423,6 +425,8 @@ pub struct Scanner {
 pub struct ConfigWatch {
     pub mtime: Option<std::time::SystemTime>,
     pub timer: f32,
+    /// Shown instead of "Config reloaded" for the next reload (a preset switch).
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -593,7 +597,7 @@ impl Plugin for LauncherPlugin {
             .init_resource::<LaunchAnim>()
             .init_resource::<CoverFades>()
             .init_resource::<LaunchBoxJob>()
-            .insert_resource(ConfigWatch { mtime: mtime_of(&config_path()), timer: 0.0 })
+            .insert_resource(ConfigWatch { mtime: mtime_of(&config_path()), timer: 0.0, note: None })
             .add_systems(Startup, setup)
             .add_systems(Last, save_on_exit)
             .add_systems(Update, apply_cameras)
@@ -603,6 +607,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(Update, fit_ui_scale)
             .add_systems(Update, crate::toss::toss_input.before(gather_mouse))
             .add_systems(Update, crate::controls::controls_input.before(gather_keyboard).before(gather_gamepad).before(crate::toss::toss_input))
+            .add_systems(Update, crate::letters::letters_input.after(crate::controls::controls_input).before(gather_gamepad).before(handle_actions))
             .add_systems(Update, crate::toss::toss_step.after(crate::toss::toss_input).before(animate_items))
             .add_systems(Update, apply_covers.after(apply_spines).before(animate_items))
             .add_systems(Update, crate::egg::egg_input.after(gather_mouse).after(gather_keyboard).after(gather_gamepad).before(handle_actions))
@@ -956,7 +961,18 @@ fn gather_keyboard(
     mouse: Res<ButtonInput<MouseButton>>,
     mut shift_tap: Local<Option<f32>>,
     chart: Res<crate::controls::ControlsChart>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
+    // Ctrl+Down minimizes, from anywhere (and is not also a step down).
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if ctrl && keys.just_pressed(KeyCode::ArrowDown) {
+        if let Ok(mut w) = windows.get_single_mut() {
+            w.set_minimized(true);
+            ASLEEP.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        rep.held = None;
+        return;
+    }
     if view.searching || menu.open || menu.just_closed || menu.art_open() || chart.busy() {
         *shift_tap = None;
         return;
@@ -1010,7 +1026,7 @@ fn gather_keyboard(
     let dirs = [(&k.left, Action::Left), (&k.right, Action::Right), (&k.up, Action::Up), (&k.down, Action::Down)];
     let mut any = false;
     for (list, act) in dirs {
-        if !keys_held(list, &keys) {
+        if !keys_held(list, &keys) || (ctrl && act == Action::Down && keys.pressed(KeyCode::ArrowDown)) {
             continue;
         }
         any = true;
@@ -1044,8 +1060,9 @@ fn gather_gamepad(
     menu: Res<crate::settings::Menu>,
     cfg: Res<Config>,
     chart: Res<crate::controls::ControlsChart>,
+    letters: Res<crate::letters::LetterJump>,
 ) {
-    if view.searching || menu.open || menu.just_closed || chart.busy() {
+    if view.searching || menu.open || menu.just_closed || chart.busy() || letters.busy() {
         return;
     }
     let mut stick = 0.0;
@@ -1068,11 +1085,11 @@ fn gather_gamepad(
         for (t, a) in [
             // A opens the case, and launches once it is open (B closes it).
             (face(&cfg, GamepadButtonType::South), if view.inspecting() { Action::Launch } else { Action::Open }),
-            (GamepadButtonType::LeftTrigger, Action::PrevLayout),
-            (GamepadButtonType::RightTrigger, Action::NextLayout),
+            // LB / RB: a tap changes the layout, held they jump by letter (see letters.rs).
             (face(&cfg, GamepadButtonType::West), Action::NextBackground),
             (face(&cfg, GamepadButtonType::North), Action::Favorite),
-            (GamepadButtonType::Select, Action::NextPlatform),
+            // Select / View / Create / - shows the controls chart (see controls.rs).
+            (GamepadButtonType::LeftThumb, Action::NextPlatform),
             (GamepadButtonType::RightThumb, Action::Flip),
         ] {
             if b(t) {
@@ -1600,10 +1617,11 @@ fn gather_mouse(
             true => {
                 let dx = delta.x * 0.011 * sens;
                 view.turn_target.x += dx;
-                view.turn_target.y += delta.y * 0.008 * sens;
+                let dy = delta.y * 0.008 * sens;
+                view.turn_target.y += dy;
                 // Spin speed for the flick, smoothed over a few frames; holding still kills it.
                 let dt = time.delta_seconds().max(1e-3);
-                view.spin_vel = view.spin_vel * 0.5 + (dx / dt) * 0.5;
+                view.spin_vel = view.spin_vel * 0.5 + Vec2::new(dx, dy) / dt * 0.5;
                 view.turning = true;
                 view.free_turned = true;
             }
@@ -1626,8 +1644,8 @@ fn gather_mouse(
         if drag.turn {
             view.turning = false;
             // A flick keeps spinning (see animate_items); otherwise settle on front / back now.
-            if view.spin_vel.abs() < 4.0 {
-                view.spin_vel = 0.0;
+            if view.spin_vel.length() < 4.0 {
+                view.spin_vel = Vec2::ZERO;
                 if drag.moved > 4.0 {
                     view.snap_turn();
                 }
@@ -1647,7 +1665,7 @@ fn gather_mouse(
                         view.last_selected = view.selected_id.clone();
                         view.turn = Vec2::ZERO;
                         view.turn_target = Vec2::ZERO;
-                        view.spin_vel = 0.0;
+                        view.spin_vel = Vec2::ZERO;
                         view.free_turned = false;
                     }
                     out.0.push(Action::Flip);
@@ -1756,7 +1774,7 @@ fn handle_actions(
                     view.turn_target = Vec2::ZERO;
                     view.disc_spin = 0.0;
                     view.disc_spin_vel = 0.0;
-                    view.spin_vel = 0.0;
+                    view.spin_vel = Vec2::ZERO;
                 }
             }
             Action::CloseCase => {
@@ -1857,7 +1875,7 @@ fn handle_actions(
                 view.turn_target.y = upright(view.turn_target.y);
                 // A deliberate quarter turn: nothing snaps it back.
                 view.free_turned = false;
-                view.spin_vel = 0.0;
+                view.spin_vel = Vec2::ZERO;
             }
             Action::ZoomIn | Action::ZoomOut => {
                 let k = if act == Action::ZoomIn { 1.0 / 1.12 } else { 1.12 };
@@ -2338,10 +2356,24 @@ fn gear_image() -> Image {
 }
 
 /// The gear in the corner opens and closes the settings menu.
-fn gear_button(mut q: Query<(&Interaction, &mut UiImage, &mut Style), With<GearButton>>, mut menu: ResMut<crate::settings::Menu>, mut last: Local<Interaction>) {
+#[allow(clippy::type_complexity)]
+fn gear_button(
+    mut q: Query<(&Interaction, &mut UiImage, &mut Style), With<GearButton>>,
+    panel: Query<&Style, (With<crate::settings::MenuPanel>, Without<GearButton>)>,
+    mut menu: ResMut<crate::settings::Menu>,
+    mut last: Local<Interaction>,
+) {
+    // How far the menu panel is out (it slides in), to sit beside it rather than on top of it.
+    let out = panel
+        .get_single()
+        .ok()
+        .filter(|p| p.display != Display::None)
+        .map_or(0.0, |p| match p.right {
+            Val::Px(r) => (1.0 + r / (crate::settings::PANEL_W + 2.0)).clamp(0.0, 1.0),
+            _ => 1.0,
+        });
     for (interaction, mut img, mut style) in &mut q {
-        // Beside the open menu panel (560 px wide) rather than on top of it.
-        let right = Val::Px(if menu.open { crate::settings::PANEL_W + 20.0 } else { 30.0 });
+        let right = Val::Px(30.0 + out * (crate::settings::PANEL_W - 10.0));
         if style.right != right {
             style.right = right;
         }
@@ -3143,7 +3175,8 @@ fn animate_items(
     if cfg.display.layout.is_grid() {
         view.focus = target;
     }
-    view.spin += dt * cfg.animation.spin.to_radians();
+    // Kept within a turn: the selection eases into the spin's current angle the short way.
+    view.spin = (view.spin + dt * cfg.animation.spin.to_radians()).rem_euclid(std::f32::consts::TAU);
     // Spin turned off: turn on round to facing front, rather than stopping at whatever angle it had.
     if cfg.animation.spin == 0.0 && view.spin != 0.0 {
         let tau = std::f32::consts::TAU;
@@ -3174,23 +3207,24 @@ fn animate_items(
         }
     }
 
-    // A newly selected item always starts facing front.
+    // A newly selected item always starts facing front (the spin, if on, starts again from there).
     if view.last_selected != view.selected_id {
         view.last_selected = view.selected_id.clone();
+        view.spin = 0.0;
         view.turn = Vec2::ZERO;
         view.turn_target = Vec2::ZERO;
-        view.spin_vel = 0.0;
+        view.spin_vel = Vec2::ZERO;
         view.free_turned = false;
     }
     // Turning follows the input closely (the item's own smoothing adds a little more lag).
     let kt = 1.0 - (-dt * 24.0 * cfg.animation.speed).exp();
     // After a flick: keep spinning, slow down, then settle on the nearer of front / back.
-    if !view.turning && view.spin_vel != 0.0 {
+    if !view.turning && view.spin_vel != Vec2::ZERO {
         let v = view.spin_vel;
-        view.turn_target.x += v * dt;
+        view.turn_target += v * dt;
         view.spin_vel *= (-dt * 2.2).exp();
-        if view.spin_vel.abs() < 2.5 {
-            view.spin_vel = 0.0;
+        if view.spin_vel.length() < 2.5 {
+            view.spin_vel = Vec2::ZERO;
             view.snap_turn();
         }
     }
@@ -3202,7 +3236,7 @@ fn animate_items(
         view.turn = view.turn_target;
     }
     // Being turned right now (dragging, coasting after a flick, or still swinging to its snap).
-    let turning_now = view.turning || view.spin_vel != 0.0 || view.turn != view.turn_target;
+    let turning_now = view.turning || view.spin_vel != Vec2::ZERO || view.turn != view.turn_target;
     // Keep the angle bounded without a visible jump.
     let tau = std::f32::consts::TAU;
     if view.turn_target.x.abs() > tau {
@@ -3329,7 +3363,10 @@ fn animate_items(
         }
         if a > 0.0 {
             pose.pos.y += idle_bob(t, sway) * a;
-            pose.rot = pose.rot * Quat::from_rotation_y((t * 0.9).sin() * 0.05 * sway * a + (view.spin - cfg.display.selected_angle.to_radians()) * a);
+            // The spin (and the selected angle) eased in the short way round as the item reaches
+            // the middle: scaling the angle itself would whirl it through every turn on the way.
+            let spin = Quat::IDENTITY.slerp(Quat::from_rotation_y(view.spin - cfg.display.selected_angle.to_radians()), a);
+            pose.rot = pose.rot * Quat::from_rotation_y((t * 0.9).sin() * 0.05 * sway * a) * spin;
         }
         if item.view_index == view.selected && view.turn != Vec2::ZERO {
             // Turned by the user: around the item's own axes, so a flip shows the back
@@ -4009,8 +4046,18 @@ fn update_ui(
         Query<&mut Text, With<UiSearch>>,
         Query<&mut Text, With<UiToast>>,
     )>,
+    mut toast_style: Query<&mut Style, With<UiToast>>,
 ) {
     toast.ttl = (toast.ttl - time.delta_seconds()).max(0.0);
+    // A new message rises into place and fades in; it fades out at the end.
+    let age = ((TOAST_SECS - toast.ttl) / 0.28).clamp(0.0, 1.0);
+    let rise = 1.0 - (1.0 - age).powi(3);
+    for mut st in &mut toast_style {
+        let top = Val::Px((1.0 - rise) * 18.0);
+        if st.top != top {
+            st.top = top;
+        }
+    }
     let game = view.current(&lib);
 
     if let Ok(mut t) = q.p0().get_single_mut() {
@@ -4119,7 +4166,7 @@ fn update_ui(
     if let Ok(mut t) = q.p6().get_single_mut() {
         let s = if toast.ttl > 0.0 { toast.text.clone() } else { String::new() };
         set(&mut t, &s);
-        t.sections[0].style.color = Color::srgba(0.6, 1.0, 0.8, (toast.ttl / 0.6).min(1.0));
+        t.sections[0].style.color = Color::srgba(0.6, 1.0, 0.8, (toast.ttl / 0.6).min(1.0) * rise);
     }
 }
 
@@ -4164,7 +4211,7 @@ fn config_watch(
     gfx.clear();
     view.respawn = true;
     view.dirty = true;
-    toast.show("Config reloaded");
+    toast.show(watch.note.take().unwrap_or_else(|| "Config reloaded".into()));
 }
 
 fn autosave(
@@ -4329,6 +4376,13 @@ fn home_button(
             UNFOCUSED_AT.store(epoch_ms(std::time::SystemTime::now()), Relaxed);
         }
     }
+    // Another Slipcase was started: show this one instead.
+    if crate::single::take_raise() {
+        if let Ok(mut w) = windows.get_single_mut() {
+            raise_window(&mut w);
+        }
+        return;
+    }
     let woken = HOME_PRESSED.swap(false, Relaxed);
     if !cfg.general.home_button || !(woken || buttons.get_just_pressed().any(|b| b.button_type == GamepadButtonType::Mode)) {
         return;
@@ -4345,10 +4399,15 @@ fn home_button(
             }
             return;
         }
-        w.set_minimized(false);
-        // Bevy asks the system for the focus when this turns true.
-        w.focused = true;
+        raise_window(&mut w);
     }
+}
+
+/// Un-minimizes the window and asks for the focus.
+fn raise_window(w: &mut Window) {
+    w.set_minimized(false);
+    // Bevy asks the system for the focus when this turns true.
+    w.focused = true;
     // KDE on Wayland ignores both from an app; its window manager is asked instead.
     let kde = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE")) && std::env::var_os("WAYLAND_DISPLAY").is_some();
     if kde {

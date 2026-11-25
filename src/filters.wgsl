@@ -11,7 +11,8 @@ struct Filters {
     lines: f32,
     // CRT frame (bezel) opacity: 0 shows the plain picture round the curved glass.
     frame: f32,
-    pad0: f32,
+    // 0..1: the filters fade in and out (mixed with the plain picture).
+    fade: f32,
     pad1: f32,
     pad2: f32,
 }
@@ -112,6 +113,14 @@ fn apply_tint(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let out = filtered(in);
+    if f.fade >= 1.0 {
+        return out;
+    }
+    return mix(textureSample(screen, samp, in.uv), out, clamp(f.fade, 0.0, 1.0));
+}
+
+fn filtered(in: FullscreenVertexOutput) -> vec4<f32> {
     let dims = vec2<f32>(textureDimensions(screen));
     let s = f.strength;
     let t = f.time;
